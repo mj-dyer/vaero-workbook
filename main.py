@@ -103,13 +103,14 @@ from typing import Any, List, Optional
 from generate_workbook import generate_workbook
 from generate_memo import generate_memo
 from deals_engine import run_analysis
-from routing_engine import match_lenders
+from routing_engine import match_lenders, rank_and_cap
 from deals_store import (
     save_deal, load_deal, list_deals, list_deals_by_user, list_deals_admin,
     update_deal_status, save_ioi, load_iois, generate_deal_id,
     save_ioi_feedback, load_declined_iois, clear_ioi_decline,
     save_lead, mark_lead_converted,
-    save_lender_application, list_lenders, get_lender, update_lender, delete_lender
+    save_lender_application, list_lenders, get_lender, update_lender, delete_lender,
+    record_distributions, get_deal_distributions, get_lender_distribution_stats,
 )
 from bio_engine import generate_bio
 
@@ -506,6 +507,12 @@ class LenderApplication(BaseModel):
     structureAppetite: Optional[list] = []  # subset of balloon | interest_only | fully_amortizing
     rateTypePreference: Optional[str] = "both"  # fixed | floating | both
     recoursePreference: Optional[str] = ""  # full | limited | non_recourse
+    # clean_only | flagged_with_offset | higher_risk_story -- self-reported, data-only
+    # for now (shown in Control Tower, not yet consumed by routing_engine.py; credit-
+    # tier/GDSCR-based matching was discussed and explicitly tabled 2026-11-22 --
+    # too many potential miscalculation points for too little gained, per Matt).
+    # Wire into routing as a real gate only if/when that decision gets revisited.
+    creditAppetite: Optional[str] = ""
     aircraftCategoryAppetite: Optional[list] = []  # piston | turboprop | vlj | light_jet | midsize_jet | super_mid_jet | large_jet | ultra_long_range
     fractionalShareAppetite: Optional[bool] = False  # distinct from whole-aircraft category appetite -- fractional is a different collateral/legal structure
     maxAircraftAgeOrigination: Optional[float] = None
@@ -569,6 +576,9 @@ class LenderUpdate(BaseModel):
     structureAppetite: Optional[list] = None
     rateTypePreference: Optional[str] = None
     recoursePreference: Optional[str] = None
+    creditAppetite: Optional[str] = None
+    priorityWeight: Optional[int] = None
+    pinned: Optional[bool] = None
     aircraftCategoryAppetite: Optional[list] = None
     fractionalShareAppetite: Optional[bool] = None
     maxAircraftAgeOrigination: Optional[float] = None
@@ -684,15 +694,46 @@ def admin_get_matched_lenders(deal_id: str, user: dict = Depends(require_admin))
     aircraft = analysis.get("aircraft") or {}
     transaction = analysis.get("transaction") or {}
     pg_type = deal.get("pgType", "")
+    all_lenders = list_lenders()
     # Fractional-share intake isn't captured on the borrower side yet (separate,
     # still-in-design pathway) -- always False here until that field exists.
     result = match_lenders(
-        aircraft, pg_type, list_lenders(), is_fractional_share=False,
+        aircraft, pg_type, all_lenders, is_fractional_share=False,
         loan_amount=transaction.get("loanAmount"), deal_ltv_fraction=transaction.get("ltv"),
     )
+    lenders_by_id = {l.get("lenderId"): l for l in all_lenders}
+    # deal_time_sensitive isn't a real deal-side field yet -- see rank_and_cap's
+    # docstring; always False until that's built.
+    result["ranking"] = rank_and_cap(result["matchedLenders"], lenders_by_id, cap=8, deal_time_sensitive=False)
     result["dealId"] = deal_id
     result["pgType"] = pg_type
     return result
+
+
+class DistributeRequest(BaseModel):
+    lenderIds: List[str]
+
+
+@app.post("/admin/deals/{deal_id}/distribute")
+def admin_distribute_deal(deal_id: str, body: DistributeRequest, user: dict = Depends(require_admin)):
+    deal = load_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail=f"Deal {deal_id} not found")
+    if not body.lenderIds:
+        raise HTTPException(status_code=400, detail="lenderIds must be non-empty")
+    record_distributions(deal_id, body.lenderIds)
+    update_deal_status(deal_id, "package_distributed")
+    return {"success": True, "dealId": deal_id, "distributedTo": body.lenderIds, "count": len(body.lenderIds)}
+
+
+@app.get("/admin/lenders/{lender_id}/distributions")
+def admin_get_lender_distributions(lender_id: str, since_days: int = 30, user: dict = Depends(require_admin)):
+    lender = get_lender(lender_id)
+    if lender is None:
+        raise HTTPException(status_code=404, detail=f"Lender {lender_id} not found")
+    stats = get_lender_distribution_stats(lender_id, institution_name=lender.get("institutionName", ""), since_days=since_days)
+    stats["lenderId"] = lender_id
+    return stats
 
 
 @app.get("/admin/deals")

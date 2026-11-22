@@ -4,7 +4,7 @@ Uses Railway DATABASE_URL env var. Falls back to JSON files if not set.
 """
 
 import json, os, uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -106,6 +106,27 @@ def _ensure_schema():
     except Exception as e:
         print(f"[deals_store] WARNING: lenders schema setup failed (non-fatal, core schema unaffected): {type(e).__name__}: {e}")
 
+    # Distributions -- isolated for the same reason as lenders above. Tracks
+    # which lenders a deal was actually routed to, so the routing engine's
+    # fairness/responsiveness ranking signal has real data to work from.
+    try:
+        conn3 = _get_conn()
+        try:
+            conn3.run("""
+                CREATE TABLE IF NOT EXISTS distributions (
+                    id              SERIAL PRIMARY KEY,
+                    deal_id         TEXT NOT NULL,
+                    lender_id       TEXT NOT NULL,
+                    distributed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            conn3.run("CREATE INDEX IF NOT EXISTS idx_distributions_deal ON distributions(deal_id)")
+            conn3.run("CREATE INDEX IF NOT EXISTS idx_distributions_lender ON distributions(lender_id)")
+        finally:
+            conn3.close()
+    except Exception as e:
+        print(f"[deals_store] WARNING: distributions schema setup failed (non-fatal, core schema unaffected): {type(e).__name__}: {e}")
+
 try:
     _ensure_schema()
     _USE_DB = True
@@ -119,12 +140,14 @@ DEALS_DIR   = os.environ.get("DEALS_DIR",   "/tmp/airelogix_deals")
 IOIS_DIR    = os.environ.get("IOIS_DIR",    "/tmp/airelogix_iois")
 LEADS_DIR   = os.environ.get("LEADS_DIR",   "/tmp/airelogix_leads")
 LENDERS_DIR = os.environ.get("LENDERS_DIR", "/tmp/airelogix_lenders")
+DISTRIBUTIONS_DIR = os.environ.get("DISTRIBUTIONS_DIR", "/tmp/airelogix_distributions")
 
 def _ensure_dirs():
     os.makedirs(DEALS_DIR, exist_ok=True)
     os.makedirs(IOIS_DIR, exist_ok=True)
     os.makedirs(LEADS_DIR, exist_ok=True)
     os.makedirs(LENDERS_DIR, exist_ok=True)
+    os.makedirs(DISTRIBUTIONS_DIR, exist_ok=True)
 
 # ── ID generation ─────────────────────────────────────────────────────────────
 def generate_deal_id() -> str:
@@ -540,6 +563,11 @@ def save_lender_application(data: dict) -> str:
     data = dict(data)
     data["lenderId"] = lender_id
     data["status"] = "pending"
+    # Admin-only, not part of the applicant-facing form -- Matt's own judgment
+    # call on a lender, set later via PATCH /admin/lenders/{id}, never submitted
+    # by the applicant themselves.
+    data["priorityWeight"] = 0
+    data["pinned"] = False
     now = datetime.now(timezone.utc).isoformat()
     data["createdAt"] = now
     data["updatedAt"] = now
@@ -642,6 +670,121 @@ def delete_lender(lender_id: str) -> bool:
             os.remove(p)
             return True
         return False
+
+
+def record_distributions(deal_id: str, lender_ids: list) -> int:
+    """Records that `deal_id` was distributed to each lender in `lender_ids`.
+    Not idempotent against re-calling with the same list -- calling twice
+    records two timestamped rows per lender, which is correct (it means the
+    deal was genuinely redistributed, e.g. after the lender pool changed)."""
+    if _USE_DB:
+        conn = _get_conn()
+        try:
+            for lender_id in lender_ids:
+                conn.run(
+                    "INSERT INTO distributions (deal_id, lender_id, distributed_at) VALUES (:deal_id, :lender_id, NOW())",
+                    deal_id=deal_id, lender_id=lender_id,
+                )
+        finally:
+            conn.close()
+    else:
+        _ensure_dirs()
+        now = datetime.now(timezone.utc).isoformat()
+        p = os.path.join(DISTRIBUTIONS_DIR, "log.json")
+        log = json.load(open(p)) if os.path.exists(p) else []
+        for lender_id in lender_ids:
+            log.append({"dealId": deal_id, "lenderId": lender_id, "distributedAt": now})
+        with open(p, "w") as f:
+            json.dump(log, f, indent=2)
+    return len(lender_ids)
+
+
+def get_deal_distributions(deal_id: str) -> list:
+    """Returns [{lenderId, distributedAt}] for a given deal."""
+    if _USE_DB:
+        conn = _get_conn()
+        try:
+            rows = conn.run(
+                "SELECT lender_id, distributed_at FROM distributions WHERE deal_id=:deal_id ORDER BY distributed_at",
+                deal_id=deal_id,
+            )
+            return [{"lenderId": r[0], "distributedAt": r[1].isoformat() if hasattr(r[1], "isoformat") else r[1]} for r in rows]
+        finally:
+            conn.close()
+    else:
+        _ensure_dirs()
+        p = os.path.join(DISTRIBUTIONS_DIR, "log.json")
+        log = json.load(open(p)) if os.path.exists(p) else []
+        return [{"lenderId": e["lenderId"], "distributedAt": e["distributedAt"]} for e in log if e["dealId"] == deal_id]
+
+
+def get_lender_distribution_stats(lender_id: str, institution_name: str = "", since_days: int = 30) -> dict:
+    """Returns {distributed, responded, unanswered, sinceDays, history} for
+    one lender over a rolling window.
+
+    KNOWN LIMITATION #1: IOI records are keyed by a free-text `institution`
+    name string (deals_store.save_ioi's long-standing convention, predates
+    this feature), not by lenderId -- there's no stable foreign key between
+    the lenders table and the iois table. `responded` below is matched by
+    exact, case-insensitive institutionName string equality as a best-effort
+    bridge. A lender who's renamed their institution, or whose stored name
+    doesn't exactly match what was typed on an IOI, will undercount here.
+    Fixing this properly means adding a real lenderId column to the iois
+    table and having the lender portal send it -- out of scope for this
+    pass, flagged here deliberately so it isn't mistaken for solved.
+
+    KNOWN LIMITATION #2: there is currently no mechanism for a lender to
+    explicitly decline a deal before ever submitting an IOI -- only IOI
+    submission is a tracked positive signal today. `responded` here means
+    "submitted an IOI," full stop; it does NOT distinguish "actively passed"
+    from "went silent," despite that distinction being the whole point of
+    this metric per the 2026-11-22 design discussion. Revisit if/when a
+    lender-side decline action gets built.
+    """
+    since_cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+    distributions = []
+    if _USE_DB:
+        conn = _get_conn()
+        try:
+            rows = conn.run(
+                "SELECT deal_id, distributed_at FROM distributions WHERE lender_id=:lender_id AND distributed_at >= :since",
+                lender_id=lender_id, since=since_cutoff,
+            )
+            distributions = [{"dealId": r[0], "distributedAt": r[1].isoformat() if hasattr(r[1], "isoformat") else r[1]} for r in rows]
+        finally:
+            conn.close()
+    else:
+        _ensure_dirs()
+        p = os.path.join(DISTRIBUTIONS_DIR, "log.json")
+        log = json.load(open(p)) if os.path.exists(p) else []
+        for e in log:
+            if e["lenderId"] != lender_id:
+                continue
+            try:
+                dt = datetime.fromisoformat(e["distributedAt"])
+            except ValueError:
+                continue
+            if dt >= since_cutoff:
+                distributions.append({"dealId": e["dealId"], "distributedAt": e["distributedAt"]})
+
+    history = []
+    responded = 0
+    name_norm = (institution_name or "").strip().lower()
+    for d in distributions:
+        iois = load_iois(d["dealId"])
+        matched = bool(name_norm) and any((ioi.get("institution") or "").strip().lower() == name_norm for ioi in iois)
+        if matched:
+            responded += 1
+        history.append({"dealId": d["dealId"], "distributedAt": d["distributedAt"], "responded": matched})
+
+    distributed_count = len(distributions)
+    return {
+        "distributed": distributed_count,
+        "responded": responded,
+        "unanswered": distributed_count - responded,
+        "sinceDays": since_days,
+        "history": history,
+    }
 
 
 # ── Calloway Demo Seed ────────────────────────────────────────────────────────

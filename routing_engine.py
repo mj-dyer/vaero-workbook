@@ -363,3 +363,58 @@ def match_lenders(deal_aircraft, pg_type, lenders, is_fractional_share=False,
         "allResults": all_results,
         "flags": flags,
     }
+
+
+# Speed ranking for typicalTimeToClose -- higher is faster. A lender who
+# hasn't set this gets the neutral middle value (1), not the worst score --
+# missing data shouldn't be punished the same as a stated slow answer.
+_SPEED_RANK = {"1_2_weeks": 3, "2_4_weeks": 2, "30_45_days": 1, "45_60_days": 0}
+
+# How much a matching timeSensitiveDealsAppetite bumps a lender's rank when
+# the deal itself is flagged urgent. Deliberately smaller than the spread
+# between speed tiers (0-3) so it nudges, rather than overrides, baseline speed.
+_URGENCY_BONUS = 2
+
+
+def rank_and_cap(matched_lenders, lenders_by_id, cap=8, deal_time_sensitive=False):
+    """Takes the ALREADY-ELIGIBLE matchedLenders list from match_lenders() and
+    narrows it down to a suggested distribution list -- this function only
+    ranks and caps, it never re-applies eligibility. A pinned lender can only
+    win a spot that ranking would otherwise have given to someone else; see
+    match_lenders' docstring for why that separation is load-bearing.
+
+    matched_lenders: the matchedLenders list from match_lenders()'s return value.
+    lenders_by_id: {lenderId: full lender record}, for reading
+        typicalTimeToClose / timeSensitiveDealsAppetite / priorityWeight / pinned.
+    cap: how many lenders actually get suggested for distribution.
+    deal_time_sensitive: whether THIS deal is itself urgent. Not yet a real
+        deal-side field (same gap as is_fractional_share in match_lenders) --
+        always False until that's built.
+
+    Returns {suggested: [lenderId,...] ordered by score, pinned forced in;
+    scored: every matched lender's score breakdown, for transparency in the UI}.
+    """
+    scored = []
+    for r in matched_lenders:
+        lender = lenders_by_id.get(r["lenderId"]) or {}
+        speed = _SPEED_RANK.get(lender.get("typicalTimeToClose"), 1)
+        priority = lender.get("priorityWeight") or 0
+        urgency = _URGENCY_BONUS if (deal_time_sensitive and lender.get("timeSensitiveDealsAppetite")) else 0
+        scored.append({
+            "lenderId": r["lenderId"],
+            "institutionName": r.get("institutionName"),
+            "score": speed + priority + urgency,
+            "pinned": bool(lender.get("pinned")),
+        })
+
+    scored.sort(key=lambda s: s["score"], reverse=True)
+
+    pinned_ids = [s["lenderId"] for s in scored if s["pinned"]]
+    remaining_slots = max(cap - len(pinned_ids), 0)
+    non_pinned_in_order = [s["lenderId"] for s in scored if not s["pinned"]]
+    suggested_set = set(pinned_ids) | set(non_pinned_in_order[:remaining_slots])
+    # Preserve overall score order in the final list even though pinned
+    # lenders were forced in regardless of where they'd otherwise rank.
+    suggested = [s["lenderId"] for s in scored if s["lenderId"] in suggested_set]
+
+    return {"suggested": suggested, "scored": scored, "cap": cap}
