@@ -39,10 +39,10 @@ def _financial(purchase_price, weak=False):
 def _submission(idx, label, make, model, price, pg_type,
                  charter_operator_type="", charter_pct=0,
                  aircraft_condition="pre_owned", construction_financing_needed="",
-                 weak_financials=False, hangar_ident="Austin, TX (AUS)"):
+                 weak_financials=False, hangar_ident="Austin, TX (AUS)", year=2019):
     loan_amount = round(price * 0.75)
     aircraft = {
-        "year": 2019,
+        "year": year,
         "make": make,
         "model": model,
         "serial": f"TST{idx:03d}",
@@ -100,15 +100,15 @@ SCENARIOS = [
     _submission(14, "Turboprop / no full PG / incidental charter 10% / based CA (raw airport code only)", "Beechcraft", "King Air 350", 6_500_000, "non_recourse", charter_operator_type="incidental", charter_pct=10, hangar_ident="VNY"),
     _submission(15, "Piston / full PG / no charter", "Cirrus", "SR22T", 1_100_000, "full_pg"),
     _submission(16, "Piston / no full PG / no charter", "Beechcraft", "Bonanza", 900_000, "non_recourse"),
-    _submission(17, "Midsize Jet / full PG / NEW + construction financing YES / based NY", "Cessna", "Citation Latitude", 15_500_000, "full_pg", aircraft_condition="new", construction_financing_needed="yes", hangar_ident="White Plains, NY (HPN)"),
-    _submission(18, "Super-Mid Jet / no full PG / NEW + construction financing NO", "Bombardier", "Challenger 350", 23_500_000, "non_recourse", aircraft_condition="new", construction_financing_needed="no"),
-    _submission(19, "Large Jet / full PG / NEW + construction financing MAYBE", "Gulfstream", "G500", 27_000_000, "full_pg", aircraft_condition="new", construction_financing_needed="maybe"),
+    _submission(17, "Midsize Jet / full PG / NEW + construction financing YES / based NY", "Cessna", "Citation Latitude", 10_500_000, "full_pg", aircraft_condition="new", construction_financing_needed="yes", hangar_ident="White Plains, NY (HPN)", year=2026),
+    _submission(18, "Super-Mid Jet / no full PG / NEW + construction financing NO", "Bombardier", "Challenger 350", 23_500_000, "non_recourse", aircraft_condition="new", construction_financing_needed="no", year=2026),
+    _submission(19, "Large Jet / full PG / NEW + construction financing MAYBE", "Gulfstream", "G500", 21_000_000, "full_pg", aircraft_condition="new", construction_financing_needed="maybe", year=2026),
     _submission(20, "Light Jet / no full PG / charter-operator financing", "Embraer", "Phenom 300", 9_800_000, "non_recourse", charter_operator_type="operator", charter_pct=90),
-    _submission(21, "Ultra Long Range / no full PG / incidental charter 25% / unparseable Aircraft Base (tests resolution-failure WARNING flag)", "Gulfstream", "G700", 72_000_000, "non_recourse", charter_operator_type="incidental", charter_pct=25, hangar_ident="Based at the family ranch, no formal strip"),
+    _submission(21, "Ultra Long Range / no full PG / incidental charter 25% / unparseable Aircraft Base (tests resolution-failure WARNING flag)", "Gulfstream", "G700", 72_000_000, "non_recourse", charter_operator_type="incidental", charter_pct=25, hangar_ident="Based at the family ranch, no formal strip", year=2025),
     _submission(22, "Unclassifiable make/model (tests fallback + WARNING flag)", "Skyworks Aviation", "Velocity X1", 10_000_000, "full_pg"),
     _submission(23, "VLJ / full PG / charter-operator financing (edge case)", "Honda", "HondaJet Elite", 5_000_000, "full_pg", charter_operator_type="operator", charter_pct=70),
-    _submission(24, "Single-engine Turboprop / NEW, construction question skipped by wizard (blank)", "Pilatus", "PC-12", 5_200_000, "full_pg", aircraft_condition="new", construction_financing_needed=""),
-    _submission(25, "Midsize Jet / no full PG / weak financials (checks routing is independent of underwriting flags)", "Hawker Beechcraft", "Hawker 900XP", 7_000_000, "non_recourse", weak_financials=True),
+    _submission(24, "Single-engine Turboprop / NEW, construction question skipped by wizard (blank)", "Pilatus", "PC-12", 5_300_000, "full_pg", aircraft_condition="new", construction_financing_needed="", year=2026),
+    _submission(25, "Midsize Jet / no full PG / weak financials (checks routing is independent of underwriting flags)", "Hawker Beechcraft", "Hawker 900XP", 7_000_000, "non_recourse", weak_financials=True, year=2011),
 ]
 
 

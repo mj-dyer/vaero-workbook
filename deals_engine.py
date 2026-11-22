@@ -10,6 +10,8 @@ import math
 from datetime import datetime, date
 from typing import Optional
 
+from routing_engine import classify_aircraft
+
 
 # ── Rate methodology ──────────────────────────────────────────────────────────
 SOFR_OIS_SPREAD_BPS = 200  # 200bps flat spread over SOFR OIS for GDSCR illustration
@@ -227,12 +229,77 @@ def get_g550_fmv(year: int, aftt: int, program: str = "", program_tier: str = ""
     return round(fmv / 1e6, 3)
 
 def get_generic_fmv(year: int, make: str, model: str, aftt: int, program: str = "") -> Optional[float]:
-    """Rough FMV estimate for aircraft types without a dedicated curve."""
-    age = 2026 - year
+    """Rough FMV estimate for aircraft types without a dedicated curve.
+
+    BUG FIX 2026-11-22: this function used to have zero piston coverage and a
+    single jet-scaled catch-all `else` branch (base up to $12M) -- any piston
+    single (Cirrus, Beechcraft, Piper, Diamond, Mooney) silently fell into
+    that branch and came back valued like a light jet. A 2019 Cirrus SR22T
+    was returning ~$9.2M FMV instead of its real ~$650-760K market value.
+    Worse, the old Cessna/Citation branch matched on `make_upper=="CESSNA"`
+    alone, which also wrongly caught Cessna 172/182/206/210 piston singles --
+    those would have been priced like a Citation jet too.
+
+    Piston and turboprop bases below are calibrated against real listings
+    (Controller.com / Trade-A-Plane / aerogurus, searched 2026-11-22): 2019
+    SR22T ~$650-760K, Bonanza G36 used $674K-$1.13M (new $1.4M), King Air 350
+    $2.3M-$6.1M, PC-12 NG $3.5-6.0M, 2020 TBM 940 $3.749M -- the pre-existing
+    King Air/PC-12/TBM curves already matched these closely and were left
+    alone. Models without a direct search hit (Piper M-series, Caravan,
+    Avanti, Diamond, Mooney, Seneca/Seminole) use the same curve shape as the
+    verified ones, informed by general market knowledge rather than a
+    confirmed comp -- worth spot-checking against real listings if a test
+    deal surfaces one of these specifically.
+    """
+    age = max(0, datetime.now().year - year)
     model_upper = (model or "").upper()
     make_upper = (make or "").upper()
 
-    if "G550" in model_upper or "G-550" in model_upper:
+    # ── Piston singles/twins -- check before any Cessna/Citation logic below,
+    # since "CESSNA" as a make also covers the 172/182/206/210 piston line,
+    # not just Citation jets. ────────────────────────────────────────────────
+    if "SR22T" in model_upper or "SR-22T" in model_upper:
+        base = max(0.35, 0.95 - age * 0.022)
+    elif "SR22" in model_upper or "SR-22" in model_upper:
+        base = max(0.30, 0.78 - age * 0.020)
+    elif "SR20" in model_upper or "SR-20" in model_upper:
+        base = max(0.22, 0.52 - age * 0.016)
+    elif "CESSNA" in make_upper and ("172" in model_upper or "SKYHAWK" in model_upper):
+        base = max(0.15, 0.46 - age * 0.012)
+    elif "CESSNA" in make_upper and ("182" in model_upper or "SKYLANE" in model_upper):
+        base = max(0.20, 0.65 - age * 0.015)
+    elif "CESSNA" in make_upper and ("206" in model_upper or "210" in model_upper or "STATIONAIR" in model_upper):
+        base = max(0.22, 0.70 - age * 0.016)
+    elif "BARON" in model_upper:
+        base = max(0.40, 1.30 - age * 0.028)
+    elif "BONANZA" in model_upper:
+        base = max(0.30, 1.10 - age * 0.025)
+    elif "MALIBU" in model_upper or "MIRAGE" in model_upper:
+        base = max(0.30, 0.90 - age * 0.022)
+    elif "SARATOGA" in model_upper:
+        base = max(0.18, 0.45 - age * 0.018)
+    elif "SENECA" in model_upper or "SEMINOLE" in model_upper:
+        base = max(0.15, 0.35 - age * 0.015)
+    elif "DA42" in model_upper:
+        base = max(0.35, 1.00 - age * 0.020)
+    elif "DA40" in model_upper:
+        base = max(0.20, 0.48 - age * 0.015)
+    elif "ACCLAIM" in model_upper:
+        base = max(0.25, 0.55 - age * 0.020)
+    elif "OVATION" in model_upper:
+        base = max(0.20, 0.42 - age * 0.018)
+    # ── Turboprops not already covered by King Air/PC-12/PC-24/TBM below ────
+    elif "M600" in model_upper:
+        base = max(1.00, 3.10 - age * 0.070)
+    elif "M500" in model_upper:
+        base = max(0.90, 2.60 - age * 0.060)
+    elif "MERIDIAN" in model_upper:
+        base = max(0.80, 2.20 - age * 0.060)
+    elif "GRAND CARAVAN" in model_upper or "CARAVAN" in model_upper:
+        base = max(0.90, 2.60 - age * 0.060)
+    elif "AVANTI" in model_upper:
+        base = max(1.80, 7.30 - age * 0.150)
+    elif "G550" in model_upper or "G-550" in model_upper:
         base = max(8.0, 34.0 - age * 0.9)
     elif "G650" in model_upper or "G700" in model_upper or "G600" in model_upper:
         base = max(28.0, 72.0 - age * 1.8)
@@ -283,7 +350,18 @@ def get_generic_fmv(year: int, make: str, model: str, aftt: int, program: str = 
     elif "TBM" in model_upper:
         base = max(1.5, 4.5 - age * 0.12)
     else:
-        base = max(2.0, 12.0 - age * 0.4)
+        # Belt-and-suspenders: a truly unrecognized model (not caught by any
+        # branch above) still shouldn't default to jet-scale pricing if it's
+        # actually a piston or turboprop -- use the same taxonomy classifier
+        # routing uses to pick a sane scale before falling back to the old
+        # jet-shaped curve.
+        fallback_category, _ = classify_aircraft(make, model)
+        if fallback_category == "piston":
+            base = max(0.15, 0.55 - age * 0.018)
+        elif fallback_category == "turboprop":
+            base = max(0.80, 2.80 - age * 0.065)
+        else:
+            base = max(2.0, 12.0 - age * 0.4)
 
     # Program adjustment
     p = (program or "").lower()
