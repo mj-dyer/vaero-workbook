@@ -209,12 +209,49 @@ def match_geography(deal_state, geography_scope, geography_states):
     return deal_state in (geography_states or [])
 
 
+def match_loan_size(loan_amount, deal_size_min, deal_size_max):
+    """dealSizeMin/dealSizeMax are real operational limits (underwriting
+    capacity, balance-sheet concentration), not a negotiable term -- a lender
+    who caps at $20MM genuinely can't/won't process a $100MM deal. Unlike LTV,
+    no tolerance band here. Missing min/max on the lender's side is never a
+    restriction (never block on incomplete data).
+    """
+    if deal_size_min is not None and loan_amount < deal_size_min:
+        return False
+    if deal_size_max is not None and loan_amount > deal_size_max:
+        return False
+    return True
+
+
+# Percentage-point tolerance for match_ltv -- one-directional on purpose
+# (2026-11-22 decision): a lender is never excluded for being MORE permissive
+# than the deal needs, only for being more conservative than the ask by more
+# than this many points. Widened from an initial 10 to 15 per Matt -- bias
+# toward more lenders seeing the deal on any hard-ish gate.
+_LTV_TOLERANCE_POINTS = 15
+
+
+def match_ltv(deal_ltv_fraction, lender_max_ltv_pct):
+    """deal_ltv_fraction is a 0-1 ratio (deals_engine's convention, e.g. 0.90);
+    lender_max_ltv_pct is a plain percentage (vaero-partners' convention, e.g.
+    90). LTV is a negotiable deal term, not a fixed capability -- a lender
+    capped below the ask can still counter with a lower-leverage structure in
+    their IOI, so this is a soft gate with a tolerance band, not an exact
+    cutoff. Missing lender maxLtv is never a restriction.
+    """
+    if lender_max_ltv_pct is None:
+        return True
+    deal_ltv_pct = (deal_ltv_fraction or 0) * 100
+    return deal_ltv_pct <= lender_max_ltv_pct + _LTV_TOLERANCE_POINTS
+
+
 # Recourse tiers ranked for the optional sort-order nicety below — lower rank
 # is "closer to full recourse," i.e. less risk absorbed by the lender.
 _RECOURSE_RANK = {"full": 0, "limited": 1, "non_recourse": 2}
 
 
-def match_lenders(deal_aircraft, pg_type, lenders, is_fractional_share=False):
+def match_lenders(deal_aircraft, pg_type, lenders, is_fractional_share=False,
+                   loan_amount=None, deal_ltv_fraction=None):
     """
     *** READ THIS BEFORE ADDING A NEW PARAMETER TO THIS FUNCTION ***
 
@@ -227,16 +264,24 @@ def match_lenders(deal_aircraft, pg_type, lenders, is_fractional_share=False):
     actually eligible for in the first place (e.g. a lender capped at a
     $10MM max deal size must never get pinned onto a $20MM deal).
 
-    So: any NEW matching dimension (loan size, max LTV, credit-tier
-    appetite, whatever comes next) belongs in THIS function as another hard
+    So: any NEW matching dimension (loan size, credit-tier appetite,
+    whatever comes next) belongs in THIS function as another hard
     `if not match_X(...): reasons.append(...)` check -- never bolted on
     later as part of a ranking/scoring step. If you're adding a parameter
     anywhere else in the routing pipeline and it could exclude a lender from
     a deal they shouldn't be on, it belongs here, not there.
 
+    The one deliberate exception is LTV (match_ltv): it's a negotiable deal
+    term, not a fixed capability, so it's a soft gate with a tolerance band
+    rather than an exact cutoff -- see match_ltv's docstring. Credit-quality/
+    GDSCR-based matching was discussed and explicitly tabled (2026-11-22) --
+    don't add it without that conversation being reopened.
+
     deal_aircraft: the deal's analysis["aircraft"] dict.
     pg_type: the deal's top-level pgType ("full_pg" | "non_recourse" | "").
     lenders: list of lender record dicts (as returned by deals_store.list_lenders()).
+    loan_amount: the deal's requested loan amount (plain dollars), for match_loan_size.
+    deal_ltv_fraction: the deal's LTV as a 0-1 ratio (deals_engine's convention), for match_ltv.
 
     Returns a dict: aircraftCategory, aircraftCategoryExactMatch, matchedLenders
     (sorted), allResults (every lender with matched bool + exclusion reasons),
@@ -270,6 +315,10 @@ def match_lenders(deal_aircraft, pg_type, lenders, is_fractional_share=False):
             reasons.append("Construction financing: lender isn't open to progress-payment financing.")
         if not match_geography(deal_state, lender.get("geographyScope"), lender.get("geographyStates")):
             reasons.append(f"Geography: lender only serves {', '.join(lender.get('geographyStates') or [])}; aircraft is based in {deal_state}.")
+        if loan_amount is not None and not match_loan_size(loan_amount, lender.get("dealSizeMin"), lender.get("dealSizeMax")):
+            reasons.append(f"Deal size: lender's range is {lender.get('dealSizeMin')}–{lender.get('dealSizeMax')}; loan amount is {loan_amount}.")
+        if deal_ltv_fraction is not None and not match_ltv(deal_ltv_fraction, lender.get("maxLtv")):
+            reasons.append(f"LTV: deal LTV of {deal_ltv_fraction*100:.1f}% exceeds lender's maximum of {lender.get('maxLtv')}% by more than the {_LTV_TOLERANCE_POINTS}-point tolerance.")
 
         all_results.append({
             "lenderId": lender.get("lenderId"),

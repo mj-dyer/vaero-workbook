@@ -682,10 +682,14 @@ def admin_get_matched_lenders(deal_id: str, user: dict = Depends(require_admin))
         raise HTTPException(status_code=404, detail=f"Deal {deal_id} not found")
     analysis = deal.get("analysis") or {}
     aircraft = analysis.get("aircraft") or {}
+    transaction = analysis.get("transaction") or {}
     pg_type = deal.get("pgType", "")
     # Fractional-share intake isn't captured on the borrower side yet (separate,
     # still-in-design pathway) -- always False here until that field exists.
-    result = match_lenders(aircraft, pg_type, list_lenders(), is_fractional_share=False)
+    result = match_lenders(
+        aircraft, pg_type, list_lenders(), is_fractional_share=False,
+        loan_amount=transaction.get("loanAmount"), deal_ltv_fraction=transaction.get("ltv"),
+    )
     result["dealId"] = deal_id
     result["pgType"] = pg_type
     return result
