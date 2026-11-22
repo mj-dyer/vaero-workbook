@@ -215,7 +215,26 @@ _RECOURSE_RANK = {"full": 0, "limited": 1, "non_recourse": 2}
 
 
 def match_lenders(deal_aircraft, pg_type, lenders, is_fractional_share=False):
-    """deal_aircraft: the deal's analysis["aircraft"] dict.
+    """
+    *** READ THIS BEFORE ADDING A NEW PARAMETER TO THIS FUNCTION ***
+
+    Everything in the `reasons` loop below is a hard eligibility gate -- a
+    lender who fails any one of them is excluded from matchedLenders, full
+    stop, before ranking/priority/pinning logic (whenever that gets built)
+    ever sees them. That ordering is load-bearing: a "pinned" or high-
+    priority lender must only ever be able to win a spot that ranking would
+    otherwise have given to someone else -- never a spot they weren't
+    actually eligible for in the first place (e.g. a lender capped at a
+    $10MM max deal size must never get pinned onto a $20MM deal).
+
+    So: any NEW matching dimension (loan size, max LTV, credit-tier
+    appetite, whatever comes next) belongs in THIS function as another hard
+    `if not match_X(...): reasons.append(...)` check -- never bolted on
+    later as part of a ranking/scoring step. If you're adding a parameter
+    anywhere else in the routing pipeline and it could exclude a lender from
+    a deal they shouldn't be on, it belongs here, not there.
+
+    deal_aircraft: the deal's analysis["aircraft"] dict.
     pg_type: the deal's top-level pgType ("full_pg" | "non_recourse" | "").
     lenders: list of lender record dicts (as returned by deals_store.list_lenders()).
 
