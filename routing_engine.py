@@ -8,6 +8,43 @@ doc for the reasoning behind each rule; this file is the literal translation
 of those decisions into code, not a reinterpretation of them.
 """
 
+import json
+import os
+import re
+
+_AIRPORT_STATES_PATH = os.path.join(os.path.dirname(__file__), "airport_states.json")
+with open(_AIRPORT_STATES_PATH) as _f:
+    # code (ICAO/IATA/local/GPS, uppercase) -> 2-letter US state/territory code.
+    # Built from OurAirports' public dataset, filtered to US large/medium/small
+    # airports -- see scratchpad generation step; regenerate by re-filtering
+    # https://davidmegginson.github.io/ourairports-data/airports.csv the same way.
+    AIRPORT_STATE = json.load(_f)
+
+_US_STATES = set(AIRPORT_STATE.values())
+_CITY_STATE_RE = re.compile(r",\s*([A-Za-z]{2})\b")
+_CODE_TOKEN_RE = re.compile(r"\b[A-Za-z]{3,4}\b")
+
+
+def resolve_state(hangar_ident):
+    """Parses the borrower wizard's free-text "Aircraft Base" field (e.g.
+    "Nashville, TN" or "BNA" or "Austin, TX (AUS)") into a 2-letter state
+    code. Returns None if it can't be resolved -- callers must never treat
+    None as a match failure, only as "can't apply a geography restriction
+    here," consistent with the rest of this engine never blocking on
+    incomplete data.
+    """
+    if not hangar_ident:
+        return None
+    text = hangar_ident.strip()
+    m = _CITY_STATE_RE.search(text)
+    if m and m.group(1).upper() in _US_STATES:
+        return m.group(1).upper()
+    for token in _CODE_TOKEN_RE.findall(text):
+        state = AIRPORT_STATE.get(token.upper())
+        if state:
+            return state
+    return None
+
 # Six-tier jet taxonomy + piston/turboprop, locked 2026-11-20. Matches the
 # slugs already used by aircraftCategoryAppetite in main.py's LenderApplication
 # model: piston | turboprop | vlj | light_jet | midsize_jet | super_mid_jet |
@@ -158,6 +195,20 @@ def match_construction_financing(aircraft_condition, construction_financing_need
     return True
 
 
+def match_geography(deal_state, geography_scope, geography_states):
+    """National-scope lenders (the default) are never restricted. Regional
+    lenders only match deals whose resolved aircraft-base state is in their
+    listed states. An unresolved deal_state (couldn't parse "Aircraft Base")
+    never excludes the deal -- same never-block philosophy as the aircraft
+    classifier's fallback path; the caller surfaces a flag instead.
+    """
+    if geography_scope != "regional":
+        return True
+    if deal_state is None:
+        return True
+    return deal_state in (geography_states or [])
+
+
 # Recourse tiers ranked for the optional sort-order nicety below — lower rank
 # is "closer to full recourse," i.e. less risk absorbed by the lender.
 _RECOURSE_RANK = {"full": 0, "limited": 1, "non_recourse": 2}
@@ -179,6 +230,8 @@ def match_lenders(deal_aircraft, pg_type, lenders, is_fractional_share=False):
     charter_operator_type = deal_aircraft.get("charterOperatorType", "")
     aircraft_condition = deal_aircraft.get("aircraftCondition", "")
     construction_financing_needed = deal_aircraft.get("constructionFinancingNeeded", "")
+    hangar_ident = deal_aircraft.get("hangarIdent", "")
+    deal_state = resolve_state(hangar_ident)
 
     all_results = []
     for lender in lenders:
@@ -196,6 +249,8 @@ def match_lenders(deal_aircraft, pg_type, lenders, is_fractional_share=False):
             reasons.append("Charter: lender's charter appetite doesn't cover this deal's charter usage.")
         if not match_construction_financing(aircraft_condition, construction_financing_needed, lender.get("constructionFinancingAppetite")):
             reasons.append("Construction financing: lender isn't open to progress-payment financing.")
+        if not match_geography(deal_state, lender.get("geographyScope"), lender.get("geographyStates")):
+            reasons.append(f"Geography: lender only serves {', '.join(lender.get('geographyStates') or [])}; aircraft is based in {deal_state}.")
 
         all_results.append({
             "lenderId": lender.get("lenderId"),
@@ -224,10 +279,18 @@ def match_lenders(deal_aircraft, pg_type, lenders, is_fractional_share=False):
             "detail": f"'{aircraft_label}' isn't in the known taxonomy — best-guess classified as {category}. Confirm or adjust.",
             "mitigant": None,
         })
+    if hangar_ident and deal_state is None:
+        flags.append({
+            "severity": "WARNING",
+            "title": "Aircraft Base Couldn't Be Resolved",
+            "detail": f"'{hangar_ident}' didn't parse to a US state — regional lenders' geography restriction wasn't applied to this deal. Confirm or adjust Aircraft Base.",
+            "mitigant": None,
+        })
 
     return {
         "aircraftCategory": category,
         "aircraftCategoryExactMatch": is_exact,
+        "aircraftBaseState": deal_state,
         "matchedLenders": matched_lenders,
         "allResults": all_results,
         "flags": flags,
