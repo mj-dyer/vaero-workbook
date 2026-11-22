@@ -103,6 +103,7 @@ from typing import Any, List, Optional
 from generate_workbook import generate_workbook
 from generate_memo import generate_memo
 from deals_engine import run_analysis
+from routing_engine import match_lenders
 from deals_store import (
     save_deal, load_deal, list_deals, list_deals_by_user, list_deals_admin,
     update_deal_status, save_ioi, load_iois, generate_deal_id,
@@ -609,6 +610,84 @@ def admin_get_deal(deal_id: str, user: dict = Depends(require_admin)):
         raise HTTPException(status_code=404, detail=f"Deal {deal_id} not found")
     result = dict(deal)
     result["analysis"] = _strip_internal_rating(result.get("analysis"))
+    return result
+
+
+@app.post("/admin/deals/seed-routing-test-batch")
+def admin_seed_routing_test_batch(user: dict = Depends(require_admin)):
+    """One-off: runs the 25 fixed scenarios in generate_test_deals.py through
+    the exact same run_analysis/save_deal path real submissions use, so the
+    routing engine can be exercised against realistic, fully-processed deal
+    records rather than hand-built dicts. Safe to call more than once -- each
+    call creates a fresh batch of 25 with new deal IDs; existing test deals
+    aren't touched or deduplicated. Borrower names are prefixed "TEST —" and
+    emails are @test.example, matching the convention already used for the
+    test lender records, so these are easy to find and delete afterward via
+    the normal admin/deals tooling.
+    """
+    from generate_test_deals import SCENARIOS
+    created = []
+    errors = []
+    for scenario in SCENARIOS:
+        data = dict(scenario)
+        label = data.pop("_label", "")
+        try:
+            deal_id = generate_deal_id()
+            data["applicationId"] = deal_id
+            analysis = run_analysis(data)
+            aircraft = data.get("aircraft", {})
+            personal = data.get("personal", {})
+            if aircraft.get("hangarIdent"):
+                analysis.setdefault("aircraft", {})["hangarIdent"] = aircraft["hangarIdent"]
+            deal = {
+                "dealId": deal_id,
+                "applicationId": deal_id,
+                "status": "select_lender_pool",
+                "stage": "select_lender_pool",
+                "ioiCount": 0,
+                "receivedDate": analysis["analysisDate"],
+                "borrowerName": "TEST — " + analysis["borrowerName"],
+                "borrowerEmail": personal.get("email", ""),
+                "borrowerUserId": "routing-test-fixture",
+                "aircraft": (str(aircraft.get("year", "")) + " " + str(aircraft.get("make", "")) + " " + str(aircraft.get("model", ""))).strip(),
+                "aircraftSub": label,
+                "loanAmount": analysis["transaction"]["loanAmount"],
+                "ltv": analysis["transaction"]["ltv"],
+                "gdscr": analysis.get("gdscr", {}).get("gdscr", 0),
+                "nwCoverage": analysis["balanceSheet"]["netWorthCoverage"],
+                "flagCount": len(analysis["flags"]),
+                "criticalFlags": len([f for f in analysis["flags"] if f.get("severity") == "CRITICAL"]),
+                "aircraftBase": aircraft.get("hangarIdent", ""),
+                "dealType": data.get("borrowerType", "individual"),
+                "analysis": analysis,
+                "transactionType": data.get("transactionType", "purchase"),
+                "borrowerType": data.get("borrowerType", "individual"),
+                "profile": data.get("profile", {}),
+                "loanPrefs": data.get("loanPrefs", {}),
+                "pgType": data.get("pgType") or "",
+                "guarantorType": data.get("guarantorType") or "",
+                "principalPGAvailable": data.get("principalPGAvailable") or "",
+            }
+            save_deal(deal)
+            created.append({"dealId": deal_id, "label": label})
+        except Exception as e:
+            errors.append({"label": label, "error": str(e)})
+    return {"created": created, "createdCount": len(created), "errors": errors}
+
+
+@app.get("/admin/deals/{deal_id}/matched-lenders")
+def admin_get_matched_lenders(deal_id: str, user: dict = Depends(require_admin)):
+    deal = load_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail=f"Deal {deal_id} not found")
+    analysis = deal.get("analysis") or {}
+    aircraft = analysis.get("aircraft") or {}
+    pg_type = deal.get("pgType", "")
+    # Fractional-share intake isn't captured on the borrower side yet (separate,
+    # still-in-design pathway) -- always False here until that field exists.
+    result = match_lenders(aircraft, pg_type, list_lenders(), is_fractional_share=False)
+    result["dealId"] = deal_id
+    result["pgType"] = pg_type
     return result
 
 
