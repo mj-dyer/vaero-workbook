@@ -228,6 +228,19 @@ def get_g550_fmv(year: int, aftt: int, program: str = "", program_tier: str = ""
     fmv = (bbv + h_adj) * (1 - prog_disc) * (1 + cal)
     return round(fmv / 1e6, 3)
 
+def _bracketed_base(model_year: int, brackets: list) -> float:
+    """brackets: [(min_year, base_value_millions), ...] sorted ascending.
+    Returns the base value for the latest bracket whose min_year <= model_year
+    (clamps to the first bracket for anything older than its min_year)."""
+    value = brackets[0][1]
+    for min_year, base_value in brackets:
+        if model_year >= min_year:
+            value = base_value
+        else:
+            break
+    return value
+
+
 def get_generic_fmv(year: int, make: str, model: str, aftt: int, program: str = "") -> Optional[float]:
     """Rough FMV estimate for aircraft types without a dedicated curve.
 
@@ -254,10 +267,21 @@ def get_generic_fmv(year: int, make: str, model: str, aftt: int, program: str = 
     age = max(0, datetime.now().year - year)
     model_upper = (model or "").upper()
     make_upper = (make or "").upper()
+    model_year = int(year)
 
     # ── Piston singles/twins -- check before any Cessna/Citation logic below,
     # since "CESSNA" as a make also covers the 172/182/206/210 piston line,
     # not just Citation jets. ────────────────────────────────────────────────
+    #
+    # Year-bracketed lookups below (vs. a single linear formula) for model
+    # lines with 40-60+ year production runs (Bonanza, 172, 182, Baron,
+    # Malibu/Mirage, Saratoga, Seneca) -- a 1965 Bonanza and a 2023 G36 are
+    # not the same aircraft depreciating along one curve, they're different
+    # generations at wildly different price points, and real listings don't
+    # move smoothly between eras either. Brackets below are anchored to real
+    # current listings (Controller.com, Trade-A-Plane, aircraftexchange.com,
+    # searched 2026-11-22); gaps between anchors are a judgment-call blend,
+    # not a verified comp -- flagged inline where that's the case.
     if "SR22T" in model_upper or "SR-22T" in model_upper:
         base = max(0.35, 0.95 - age * 0.022)
     elif "SR22" in model_upper or "SR-22" in model_upper:
@@ -265,21 +289,52 @@ def get_generic_fmv(year: int, make: str, model: str, aftt: int, program: str = 
     elif "SR20" in model_upper or "SR-20" in model_upper:
         base = max(0.22, 0.52 - age * 0.016)
     elif "CESSNA" in make_upper and ("172" in model_upper or "SKYHAWK" in model_upper):
-        base = max(0.15, 0.46 - age * 0.012)
+        base = _bracketed_base(model_year, [
+            (0,    0.12), (1970, 0.165), (1980, 0.165),
+            (1990, 0.20), (1999, 0.235), (2006, 0.37), (2016, 0.46),
+        ])
     elif "CESSNA" in make_upper and ("182" in model_upper or "SKYLANE" in model_upper):
-        base = max(0.20, 0.65 - age * 0.015)
+        base = _bracketed_base(model_year, [
+            (0,    0.10), (1971, 0.30), (1980, 0.22),
+            (2000, 0.30), (2010, 0.65),
+        ])
     elif "CESSNA" in make_upper and ("206" in model_upper or "210" in model_upper or "STATIONAIR" in model_upper):
-        base = max(0.22, 0.70 - age * 0.016)
+        # No direct comp pulled for 206/210 specifically -- scaled ~1.35x the
+        # 182 brackets (larger/pricier sibling), same relative positioning as
+        # before this fix. Worth a direct search if a 206/210 deal shows up.
+        base = _bracketed_base(model_year, [
+            (0,    0.14), (1971, 0.40), (1980, 0.30),
+            (2000, 0.40), (2010, 0.88),
+        ])
     elif "BARON" in model_upper:
-        base = max(0.40, 1.30 - age * 0.028)
+        base = _bracketed_base(model_year, [
+            (0,    0.17), (1975, 0.23), (1985, 0.45),
+            (2000, 0.80), (2003, 1.05), (2011, 1.20),
+        ])
     elif "BONANZA" in model_upper:
-        base = max(0.30, 1.10 - age * 0.025)
+        base = _bracketed_base(model_year, [
+            (0,    0.075), (1960, 0.115), (1970, 0.20),
+            (1980, 0.32), (1990, 0.40), (2000, 0.50), (2007, 0.625),
+        ]) if model_year < 2007 else max(0.30, 1.10 - age * 0.025)
     elif "MALIBU" in model_upper or "MIRAGE" in model_upper:
-        base = max(0.30, 0.90 - age * 0.022)
+        base = _bracketed_base(model_year, [
+            (0,    0.25), (1984, 0.35), (1988, 0.42),
+            (1996, 0.55), (2003, 0.80), (2013, 0.95),
+        ])
     elif "SARATOGA" in model_upper:
-        base = max(0.18, 0.45 - age * 0.018)
-    elif "SENECA" in model_upper or "SEMINOLE" in model_upper:
-        base = max(0.15, 0.35 - age * 0.015)
+        base = _bracketed_base(model_year, [
+            (0,    0.09), (1980, 0.22), (1990, 0.30), (2000, 0.40),
+        ])
+    elif "SENECA" in model_upper:
+        base = _bracketed_base(model_year, [
+            (0,    0.08), (1975, 0.16), (1983, 0.35), (2004, 0.65),
+        ])
+    elif "SEMINOLE" in model_upper:
+        # No direct comp -- scaled ~0.65x Seneca (smaller, trainer-oriented
+        # twin), same relative positioning as before this fix.
+        base = _bracketed_base(model_year, [
+            (0,    0.06), (1975, 0.10), (1983, 0.23), (2004, 0.42),
+        ])
     elif "DA42" in model_upper:
         base = max(0.35, 1.00 - age * 0.020)
     elif "DA40" in model_upper:
