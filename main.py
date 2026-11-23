@@ -103,7 +103,7 @@ from typing import Any, List, Optional
 from generate_workbook import generate_workbook
 from generate_memo import generate_memo
 from deals_engine import run_analysis
-from routing_engine import match_lenders, rank_and_cap
+from routing_engine import match_lenders, rank_and_cap, suggest_relaxations
 from deals_store import (
     save_deal, load_deal, list_deals, list_deals_by_user, list_deals_admin,
     update_deal_status, save_ioi, load_iois, generate_deal_id,
@@ -705,6 +705,15 @@ def admin_get_matched_lenders(deal_id: str, user: dict = Depends(require_admin))
     # deal_time_sensitive isn't a real deal-side field yet -- see rank_and_cap's
     # docstring; always False until that's built.
     result["ranking"] = rank_and_cap(result["matchedLenders"], lenders_by_id, cap=8, deal_time_sensitive=False)
+    # Only worth computing when matches are thin -- a healthy match count
+    # doesn't need a "how to get more lenders" suggestion.
+    if len(result["matchedLenders"]) < 3:
+        result["relaxations"] = suggest_relaxations(
+            aircraft, pg_type, transaction.get("loanAmount"), transaction.get("ltv"),
+            all_lenders, is_fractional_share=False,
+        )
+    else:
+        result["relaxations"] = None
     result["dealId"] = deal_id
     result["pgType"] = pg_type
     return result

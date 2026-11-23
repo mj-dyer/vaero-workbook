@@ -418,3 +418,124 @@ def rank_and_cap(matched_lenders, lenders_by_id, cap=8, deal_time_sensitive=Fals
     suggested = [s["lenderId"] for s in scored if s["lenderId"] in suggested_set]
 
     return {"suggested": suggested, "scored": scored, "cap": cap}
+
+
+# Negotiable-dimension exclusion reasons are identified by the text prefix
+# each one's `reasons.append(...)` call in match_lenders() uses, e.g.
+# "Recourse: ...", "LTV: ...". This couples suggest_relaxations() to the
+# exact wording above -- if a reason message's leading label ever changes,
+# update FIXED_DIMENSION_PREFIXES and the checks below to match. Not a
+# structured reasonCode because reasons are meant to read as plain English
+# in the Control Tower UI already; splitting that into code+text felt like
+# more machinery than this needed given both live in the same file.
+FIXED_DIMENSION_PREFIXES = ("Aircraft category", "Geography", "Deal size")
+
+
+def suggest_relaxations(deal_aircraft, pg_type, loan_amount, deal_ltv_fraction, lenders, is_fractional_share=False):
+    """Diagnostic companion to match_lenders(), for when a deal's matched set
+    is thin or zero. Finds the minimal change on each NEGOTIABLE dimension
+    (recourse/PG, LTV -- things a borrower actually controls and might
+    reconsider) that unlocks additional lenders, so a borrower sees "reduce
+    to 88% LTV unlocks 3 lenders" instead of a dead end.
+
+    Deliberately models ONE change at a time, not combinations -- a lender
+    excluded on both recourse AND LTV won't show up in either single-
+    dimension suggestion's unlock count, since relaxing just one of the two
+    wouldn't actually include them. Combinatorial suggestions ("relax both
+    X and Y together") aren't computed here; this is a v1 simplification,
+    not an oversight -- revisit if single-dimension suggestions turn out to
+    miss too many real cases.
+
+    FIXED dimensions (aircraft category, geography, loan size) are facts
+    about the deal, not something a borrower can restructure their way out
+    of -- if one of those excludes every single approved lender, it's
+    reported separately as a pipeline-coverage gap (fixedGaps), meant to
+    route to Matt, not to be shown to the borrower as an actionable "try
+    this instead."
+
+    Returns {baselineMatchedCount, suggestions: [{dimension, change,
+    unlockCount, unlockedLenderIds}], fixedGaps: [{dimension, detail}]}.
+    """
+    baseline = match_lenders(
+        deal_aircraft, pg_type, lenders, is_fractional_share=is_fractional_share,
+        loan_amount=loan_amount, deal_ltv_fraction=deal_ltv_fraction,
+    )
+    baseline_matched_ids = set(r["lenderId"] for r in baseline["matchedLenders"])
+
+    suggestions = []
+
+    # ── Recourse/PG relaxation ────────────────────────────────────────────
+    if pg_type != "full_pg":
+        counterfactual = match_lenders(
+            deal_aircraft, "full_pg", lenders, is_fractional_share=is_fractional_share,
+            loan_amount=loan_amount, deal_ltv_fraction=deal_ltv_fraction,
+        )
+        new_ids = set(r["lenderId"] for r in counterfactual["matchedLenders"]) - baseline_matched_ids
+        if new_ids:
+            suggestions.append({
+                "dimension": "recourse",
+                "change": "Offer a full personal guarantee instead of requesting non-recourse/limited-recourse terms.",
+                "unlockCount": len(new_ids),
+                "unlockedLenderIds": sorted(new_ids),
+            })
+
+    # ── LTV relaxation ────────────────────────────────────────────────────
+    # Only lenders excluded SOLELY on LTV -- relaxing LTV alone wouldn't help
+    # a lender who's also excluded on, say, aircraft category.
+    if deal_ltv_fraction is not None:
+        deal_ltv_pct = deal_ltv_fraction * 100
+        ltv_thresholds = []
+        for r in baseline["allResults"]:
+            if r["matched"] or len(r["reasons"]) != 1 or not r["reasons"][0].startswith("LTV:"):
+                continue
+            lender = next((l for l in lenders if l.get("lenderId") == r["lenderId"]), None)
+            if lender and lender.get("maxLtv") is not None:
+                ltv_thresholds.append((lender["maxLtv"] + _LTV_TOLERANCE_POINTS, r["lenderId"]))
+
+        if ltv_thresholds:
+            # Descending by threshold: the highest threshold is the smallest
+            # possible reduction from the deal's current ask (the "easiest"
+            # change), so it goes first. As the borrower is willing to cut
+            # LTV further (lower target), strictly more lenders qualify --
+            # cutting LTV can only ever help a lender's own eligibility,
+            # never hurt it, so later/bigger-cut tiers are a superset.
+            ltv_thresholds.sort(reverse=True)
+            tiers, running = [], []
+            last_threshold = None
+            for threshold, lender_id in ltv_thresholds:
+                if threshold != last_threshold:
+                    tiers.append({"targetLtvPct": threshold, "lenderIds": []})
+                    last_threshold = threshold
+                tiers[-1]["lenderIds"].append(lender_id)
+            for tier in tiers:
+                running = running + tier["lenderIds"]
+                suggestions.append({
+                    "dimension": "ltv",
+                    "change": f"Reduce requested LTV from {deal_ltv_pct:.0f}% to {tier['targetLtvPct']:.0f}%.",
+                    "unlockCount": len(running),
+                    "unlockedLenderIds": list(running),
+                })
+
+    suggestions.sort(key=lambda s: -s["unlockCount"])
+
+    # ── Fixed-dimension pipeline gaps ────────────────────────────────────
+    total_approved = len(baseline["allResults"])
+    exclusion_counts = {}
+    for r in baseline["allResults"]:
+        if r["matched"]:
+            continue
+        for reason in r["reasons"]:
+            for prefix in FIXED_DIMENSION_PREFIXES:
+                if reason.startswith(prefix + ":"):
+                    exclusion_counts[prefix] = exclusion_counts.get(prefix, 0) + 1
+    fixed_gaps = [
+        {"dimension": prefix, "detail": f"Every approved lender is excluded on {prefix}; no structural change available."}
+        for prefix, count in exclusion_counts.items()
+        if total_approved > 0 and count == total_approved
+    ]
+
+    return {
+        "baselineMatchedCount": len(baseline["matchedLenders"]),
+        "suggestions": suggestions,
+        "fixedGaps": fixed_gaps,
+    }
