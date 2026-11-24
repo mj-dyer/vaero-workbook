@@ -283,9 +283,25 @@ def get_generic_fmv(year: int, make: str, model: str, aftt: int, program: str = 
     # searched 2026-11-22); gaps between anchors are a judgment-call blend,
     # not a verified comp -- flagged inline where that's the case.
     if "SR22T" in model_upper or "SR-22T" in model_upper:
-        base = max(0.35, 0.95 - age * 0.022)
+        # CORRECTED 2026-11-23: new-aircraft SR22T pricing has risen faster
+        # than used units depreciate (G6->G7->G7+ generational repricing) --
+        # these brackets INCREASE through recent years, not a typo. Real
+        # anchors: 2026 new list $1,069,900 (Cirrus's own price list), used
+        # G7 trading $1.04-1.15M, 2019 G6 trading $650-760K (same comps as
+        # the original fix). Pre-2017 brackets are a judgment-call blend,
+        # not independently verified.
+        base = _bracketed_base(model_year, [
+            (0, 0.30), (2010, 0.45), (2015, 0.55), (2017, 0.62),
+            (2019, 0.70), (2022, 0.85), (2024, 1.00), (2026, 1.10),
+        ])
     elif "SR22" in model_upper or "SR-22" in model_upper:
-        base = max(0.30, 0.78 - age * 0.020)
+        # Base (non-turbo) SR22 -- same generational repricing as SR22T,
+        # scaled slightly below it. A new base SR22 is now generally $1MM+
+        # per Matt (2026-11-23); 2026 bracket reflects that directly.
+        base = _bracketed_base(model_year, [
+            (0, 0.25), (2010, 0.38), (2015, 0.47), (2017, 0.53),
+            (2019, 0.60), (2022, 0.75), (2024, 0.92), (2026, 1.00),
+        ])
     elif "SR20" in model_upper or "SR-20" in model_upper:
         base = max(0.22, 0.52 - age * 0.016)
     elif "CESSNA" in make_upper and ("172" in model_upper or "SKYHAWK" in model_upper):
@@ -344,16 +360,28 @@ def get_generic_fmv(year: int, make: str, model: str, aftt: int, program: str = 
     elif "OVATION" in model_upper:
         base = max(0.20, 0.42 - age * 0.018)
     # ── Turboprops not already covered by King Air/PC-12/PC-24/TBM below ────
+    # These are the piston/turboprop models that remain relevant above
+    # Vaero's $1MM platform minimum loan amount (confirmed 2026-11-23) --
+    # year-bracketed against real listings (Controller.com, Trade-A-Plane,
+    # searched 2026-11-23), replacing the prior single-curve formulas.
     elif "M600" in model_upper:
-        base = max(1.00, 3.10 - age * 0.070)
+        base = _bracketed_base(model_year, [(0, 1.0), (2015, 2.5), (2020, 2.975), (2026, 3.2)])
     elif "M500" in model_upper:
-        base = max(0.90, 2.60 - age * 0.060)
+        base = _bracketed_base(model_year, [(0, 0.9), (2015, 1.895), (2020, 2.3), (2026, 2.75)])
     elif "MERIDIAN" in model_upper:
-        base = max(0.80, 2.20 - age * 0.060)
+        base = _bracketed_base(model_year, [(0, 0.75), (2000, 0.95), (2006, 1.15), (2010, 1.45), (2015, 1.95)])
     elif "GRAND CARAVAN" in model_upper or "CARAVAN" in model_upper:
-        base = max(0.90, 2.60 - age * 0.060)
+        # Noisier used-market data than the Piper M-series above (real
+        # listings aren't monotonic by year -- a 2013 unit listed below a
+        # 2002 one in the raw search results) -- this is a smoothed path
+        # through the real anchors, not a tight fit.
+        base = _bracketed_base(model_year, [(0, 1.0), (2002, 1.7), (2013, 2.0), (2015, 2.4), (2019, 3.0), (2026, 3.1)])
     elif "AVANTI" in model_upper:
-        base = max(1.80, 7.30 - age * 0.150)
+        # Thin used market, noisiest data of this batch (real listings span
+        # $1.275M-$3.9M across 2003-2004 alone) -- smoothed path anchored to
+        # the new Avanti EVO list price at the top end, not independently
+        # verified at every bracket.
+        base = _bracketed_base(model_year, [(0, 1.0), (1992, 1.6), (2003, 1.5), (2009, 2.5), (2015, 4.0), (2020, 6.0), (2026, 7.3)])
     elif "G550" in model_upper or "G-550" in model_upper:
         base = max(8.0, 34.0 - age * 0.9)
     elif "G650" in model_upper or "G700" in model_upper or "G600" in model_upper:
