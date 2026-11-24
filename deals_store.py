@@ -3,7 +3,7 @@ AireLogix Deal Store — PostgreSQL backend using pg8000 (pure Python, no native
 Uses Railway DATABASE_URL env var. Falls back to JSON files if not set.
 """
 
-import json, os, uuid
+import json, os, secrets, uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
@@ -625,6 +625,42 @@ def save_lender_application(data: dict) -> str:
     return lender_id
 
 
+def save_lender_preapproved(data: dict) -> str:
+    """Create a lender record that is already status='approved', with a
+    portal access token generated up front -- for admin-authorized synthetic
+    data (demo seeding), never for applicant-submitted applications. Unlike
+    save_lender_application, this does not queue a welcome email; callers
+    needing one should go through the normal approval PATCH flow instead."""
+    lender_id = generate_lender_id()
+    data = dict(data)
+    data["lenderId"] = lender_id
+    data["status"] = "approved"
+    data.setdefault("priorityWeight", 0)
+    data.setdefault("pinned", False)
+    data["portalAccessToken"] = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc).isoformat()
+    data["createdAt"] = now
+    data["updatedAt"] = now
+
+    if _USE_DB:
+        conn = _get_conn()
+        try:
+            contacts = data.get("contacts") or []
+            primary_email = contacts[0].get("email", "") if contacts else data.get("contactEmail", "")
+            conn.run("""
+                INSERT INTO lenders (lender_id, status, institution_name, contact_email, data)
+                VALUES (:lender_id, 'approved', :name, :email, :data)
+            """, lender_id=lender_id, name=data.get("institutionName", ""),
+                 email=primary_email, data=json.dumps(data))
+        finally:
+            conn.close()
+    else:
+        _ensure_dirs()
+        with open(os.path.join(LENDERS_DIR, f"{lender_id}.json"), "w") as f:
+            json.dump(data, f, indent=2)
+    return lender_id
+
+
 def list_lenders() -> list:
     if _USE_DB:
         conn = _get_conn()
@@ -704,6 +740,38 @@ def delete_lender(lender_id: str) -> bool:
             os.remove(p)
             return True
         return False
+
+
+def delete_deal(deal_id: str) -> bool:
+    """Permanently removes a deal record. Unlike archive_deal (sets
+    status='archived', preserves the record), this is a true, irreversible
+    delete -- callers should confirm with the user before calling this."""
+    if _USE_DB:
+        conn = _get_conn()
+        try:
+            rows = conn.run("DELETE FROM deals WHERE deal_id=:id RETURNING deal_id", id=deal_id)
+            return len(rows) > 0
+        finally:
+            conn.close()
+    else:
+        _ensure_dirs()
+        p = os.path.join(DEALS_DIR, f"{deal_id}.json")
+        if os.path.exists(p):
+            os.remove(p)
+            return True
+        return False
+
+
+def delete_deals_by_borrower_name_prefix(prefix: str) -> list:
+    """Permanently deletes every deal whose borrowerName starts with `prefix`
+    (case-sensitive, exact prefix match) -- built for clearing out "TEST — "
+    seeded deals before a demo. Returns the list of deleted dealIds."""
+    deleted = []
+    for deal in list_deals_admin():
+        if (deal.get("borrowerName") or "").startswith(prefix):
+            if delete_deal(deal["dealId"]):
+                deleted.append(deal["dealId"])
+    return deleted
 
 
 def record_distributions(deal_id: str, lender_ids: list) -> int:

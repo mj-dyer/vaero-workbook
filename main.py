@@ -135,7 +135,8 @@ from deals_store import (
     save_lead, mark_lead_converted,
     save_lender_application, list_lenders, get_lender, update_lender, delete_lender,
     record_distributions, get_deal_distributions, get_lender_distribution_stats,
-    record_lender_decline,
+    record_lender_decline, delete_deals_by_borrower_name_prefix,
+    save_lender_preapproved,
 )
 from bio_engine import generate_bio
 
@@ -677,6 +678,16 @@ def admin_get_deal(deal_id: str, user: dict = Depends(require_admin)):
     return result
 
 
+@app.post("/admin/deals/delete-test-batch")
+def admin_delete_test_batch(user: dict = Depends(require_admin)):
+    """Permanently deletes every deal whose borrowerName starts with
+    "TEST — " (the convention used by seed-routing-test-batch and the
+    routing-test fixtures). Irreversible -- admin-only, intended for
+    clearing fixture data before a demo."""
+    deleted = delete_deals_by_borrower_name_prefix("TEST — ")
+    return {"deletedCount": len(deleted), "deletedDealIds": deleted}
+
+
 @app.post("/admin/deals/seed-routing-test-batch")
 def admin_seed_routing_test_batch(user: dict = Depends(require_admin)):
     """One-off: runs the 25 fixed scenarios in generate_test_deals.py through
@@ -886,6 +897,22 @@ def admin_delete_lender(lender_id: str, user: dict = Depends(require_admin)):
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Lender {lender_id} not found")
     return {"success": True, "lenderId": lender_id}
+
+
+@app.post("/admin/lenders/seed-demo-lenders")
+def admin_seed_demo_lenders(user: dict = Depends(require_admin)):
+    """One-off: creates the 12 fabricated, pre-approved demo lenders in
+    generate_demo_lenders.py for sales/investor demos. Each is written
+    directly at status="approved" with a portal access token already set
+    (no welcome email is sent). Safe to call more than once -- each call
+    creates a fresh set of 12 with new lender IDs; existing lenders aren't
+    touched or deduplicated."""
+    from generate_demo_lenders import DEMO_LENDERS
+    created = []
+    for data in DEMO_LENDERS:
+        lender_id = save_lender_preapproved(dict(data))
+        created.append({"lenderId": lender_id, "institutionName": data["institutionName"]})
+    return {"createdCount": len(created), "created": created}
 
 
 @app.post("/admin/lenders/{lender_id}/resend-access")
