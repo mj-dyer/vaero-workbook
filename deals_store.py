@@ -52,6 +52,13 @@ def _ensure_schema():
                 data         TEXT NOT NULL
             )
         """)
+        # Real lender identity on every IOI -- added 2026-11-23 to replace the
+        # institution-name string match (fragile: a renamed institution or a
+        # typo on the lender portal's form silently broke the link). NULL on
+        # any IOI submitted before this column existed; get_lender_distribution_stats
+        # falls back to the old name-match only for those pre-existing rows.
+        conn.run("ALTER TABLE iois ADD COLUMN IF NOT EXISTS lender_id TEXT")
+        conn.run("CREATE INDEX IF NOT EXISTS idx_iois_lender ON iois(lender_id)")
         # Ties a deal to the Supabase auth user (borrower) who submitted it,
         # so the backend can authorize "give me my own deals" by JWT subject
         # instead of trusting a client-supplied email.
@@ -127,6 +134,30 @@ def _ensure_schema():
     except Exception as e:
         print(f"[deals_store] WARNING: distributions schema setup failed (non-fatal, core schema unaffected): {type(e).__name__}: {e}")
 
+    # Lender declines -- a real per-lender "reviewed and passing" signal,
+    # separate from the deal's own global status field. Added 2026-11-23
+    # specifically because the lender portal's pre-existing "Pass on Deal"
+    # button wrote to deals.status directly, which meant one lender passing
+    # marked the deal passed for every lender on a multi-lender distribution.
+    # Declining here never touches the deal record at all.
+    try:
+        conn4 = _get_conn()
+        try:
+            conn4.run("""
+                CREATE TABLE IF NOT EXISTS lender_declines (
+                    id           SERIAL PRIMARY KEY,
+                    deal_id      TEXT NOT NULL,
+                    lender_id    TEXT NOT NULL,
+                    declined_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(deal_id, lender_id)
+                )
+            """)
+            conn4.run("CREATE INDEX IF NOT EXISTS idx_lender_declines_lender ON lender_declines(lender_id)")
+        finally:
+            conn4.close()
+    except Exception as e:
+        print(f"[deals_store] WARNING: lender_declines schema setup failed (non-fatal, core schema unaffected): {type(e).__name__}: {e}")
+
 try:
     _ensure_schema()
     _USE_DB = True
@@ -141,6 +172,7 @@ IOIS_DIR    = os.environ.get("IOIS_DIR",    "/tmp/airelogix_iois")
 LEADS_DIR   = os.environ.get("LEADS_DIR",   "/tmp/airelogix_leads")
 LENDERS_DIR = os.environ.get("LENDERS_DIR", "/tmp/airelogix_lenders")
 DISTRIBUTIONS_DIR = os.environ.get("DISTRIBUTIONS_DIR", "/tmp/airelogix_distributions")
+LENDER_DECLINES_DIR = os.environ.get("LENDER_DECLINES_DIR", "/tmp/airelogix_lender_declines")
 
 def _ensure_dirs():
     os.makedirs(DEALS_DIR, exist_ok=True)
@@ -148,6 +180,7 @@ def _ensure_dirs():
     os.makedirs(LEADS_DIR, exist_ok=True)
     os.makedirs(LENDERS_DIR, exist_ok=True)
     os.makedirs(DISTRIBUTIONS_DIR, exist_ok=True)
+    os.makedirs(LENDER_DECLINES_DIR, exist_ok=True)
 
 # ── ID generation ─────────────────────────────────────────────────────────────
 def generate_deal_id() -> str:
@@ -332,15 +365,16 @@ def save_ioi(deal_id: str, ioi: dict) -> str:
     ioi["dealId"] = deal_id
     ioi.setdefault("submittedAt", datetime.now(timezone.utc).isoformat())
     institution = ioi.get("institution", "")
+    lender_id = ioi.get("lenderId", "")
 
     if _USE_DB:
         conn = _get_conn()
         try:
             conn.run("""
-                INSERT INTO iois (ioi_id, deal_id, institution, data)
-                VALUES (:ioi_id, :deal_id, :institution, :data)
-                ON CONFLICT (ioi_id) DO UPDATE SET data=EXCLUDED.data
-            """, ioi_id=ioi_id, deal_id=deal_id, institution=institution, data=json.dumps(ioi))
+                INSERT INTO iois (ioi_id, deal_id, institution, lender_id, data)
+                VALUES (:ioi_id, :deal_id, :institution, :lender_id, :data)
+                ON CONFLICT (ioi_id) DO UPDATE SET data=EXCLUDED.data, lender_id=EXCLUDED.lender_id
+            """, ioi_id=ioi_id, deal_id=deal_id, institution=institution, lender_id=lender_id, data=json.dumps(ioi))
             count_rows = conn.run(
                 "SELECT COUNT(*)::int FROM iois WHERE deal_id=:deal_id",
                 deal_id=deal_id
@@ -719,27 +753,20 @@ def get_deal_distributions(deal_id: str) -> list:
 
 
 def get_lender_distribution_stats(lender_id: str, institution_name: str = "", since_days: int = 30) -> dict:
-    """Returns {distributed, responded, unanswered, sinceDays, history} for
-    one lender over a rolling window.
+    """Returns {distributed, responded, declined, unanswered, neverConverts,
+    sinceDays, history} for one lender over a rolling window.
 
-    KNOWN LIMITATION #1: IOI records are keyed by a free-text `institution`
-    name string (deals_store.save_ioi's long-standing convention, predates
-    this feature), not by lenderId -- there's no stable foreign key between
-    the lenders table and the iois table. `responded` below is matched by
-    exact, case-insensitive institutionName string equality as a best-effort
-    bridge. A lender who's renamed their institution, or whose stored name
-    doesn't exactly match what was typed on an IOI, will undercount here.
-    Fixing this properly means adding a real lenderId column to the iois
-    table and having the lender portal send it -- out of scope for this
-    pass, flagged here deliberately so it isn't mistaken for solved.
-
-    KNOWN LIMITATION #2: there is currently no mechanism for a lender to
-    explicitly decline a deal before ever submitting an IOI -- only IOI
-    submission is a tracked positive signal today. `responded` here means
-    "submitted an IOI," full stop; it does NOT distinguish "actively passed"
-    from "went silent," despite that distinction being the whole point of
-    this metric per the 2026-11-22 design discussion. Revisit if/when a
-    lender-side decline action gets built.
+    FIXED 2026-11-23 (both were previously KNOWN LIMITATIONS here): IOIs now
+    carry a real lender_id column, matched directly instead of the old
+    institution-name string comparison -- name-matching only still runs as a
+    fallback for IOI rows submitted before this column existed. A real
+    per-lender decline action (lender_declines table) now exists too, fed
+    by the lender portal's magic-link-authenticated "Pass on Deal" action --
+    a decline counts as real engagement (`declined`), not silence, per the
+    2026-11-23 discussion. Only a lender who engages at real volume (5+
+    distributions) via decline but has NEVER once converted to an IOI trips
+    `neverConverts` -- a single decline on a small sample isn't evidence of
+    anything.
     """
     since_cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
     distributions = []
@@ -767,24 +794,92 @@ def get_lender_distribution_stats(lender_id: str, institution_name: str = "", si
             if dt >= since_cutoff:
                 distributions.append({"dealId": e["dealId"], "distributedAt": e["distributedAt"]})
 
+    declined_deal_ids = set(get_lender_declines(lender_id))
     history = []
-    responded = 0
+    ioi_count = 0
+    decline_count = 0
     name_norm = (institution_name or "").strip().lower()
     for d in distributions:
         iois = load_iois(d["dealId"])
-        matched = bool(name_norm) and any((ioi.get("institution") or "").strip().lower() == name_norm for ioi in iois)
+        # Real lenderId match first (added 2026-11-23); name-match is now
+        # only a fallback for IOI rows submitted before that column existed.
+        matched = any((ioi.get("lenderId") or "") == lender_id for ioi in iois)
+        if not matched and name_norm:
+            matched = any(
+                not (ioi.get("lenderId") or "") and (ioi.get("institution") or "").strip().lower() == name_norm
+                for ioi in iois
+            )
+        declined = d["dealId"] in declined_deal_ids
         if matched:
-            responded += 1
-        history.append({"dealId": d["dealId"], "distributedAt": d["distributedAt"], "responded": matched})
+            ioi_count += 1
+        elif declined:
+            decline_count += 1
+        history.append({
+            "dealId": d["dealId"], "distributedAt": d["distributedAt"],
+            "responded": matched, "declined": declined and not matched,
+        })
 
     distributed_count = len(distributions)
+    engaged = ioi_count + decline_count
+    # A decline is real engagement -- the lender looked at the deal and made
+    # a call. What's actually worth flagging is a lender who engages (via
+    # decline) at real volume but has NEVER once converted to an IOI, per
+    # the 2026-11-23 discussion -- a small sample isn't evidence of anything.
+    never_converts = distributed_count >= 5 and ioi_count == 0 and decline_count >= 1
     return {
         "distributed": distributed_count,
-        "responded": responded,
-        "unanswered": distributed_count - responded,
+        "responded": ioi_count,
+        "declined": decline_count,
+        "unanswered": distributed_count - engaged,
+        "neverConverts": never_converts,
         "sinceDays": since_days,
         "history": history,
     }
+
+
+def record_lender_decline(deal_id: str, lender_id: str) -> bool:
+    """Records that a lender actively reviewed and passed on a deal --
+    separate from the deal's own global status field entirely (unlike the
+    older PATCH /deals/{id}/status mechanism, which one lender using it
+    would incorrectly mark the deal passed for every lender on a multi-
+    lender distribution). Idempotent -- declining twice is a no-op, not an
+    error, since a lender might hit the button more than once."""
+    if _USE_DB:
+        conn = _get_conn()
+        try:
+            conn.run(
+                "INSERT INTO lender_declines (deal_id, lender_id) VALUES (:deal_id, :lender_id) "
+                "ON CONFLICT (deal_id, lender_id) DO NOTHING",
+                deal_id=deal_id, lender_id=lender_id,
+            )
+            return True
+        finally:
+            conn.close()
+    else:
+        _ensure_dirs()
+        p = os.path.join(LENDER_DECLINES_DIR, "log.json")
+        log = json.load(open(p)) if os.path.exists(p) else []
+        if not any(e["dealId"] == deal_id and e["lenderId"] == lender_id for e in log):
+            log.append({"dealId": deal_id, "lenderId": lender_id, "declinedAt": datetime.now(timezone.utc).isoformat()})
+            with open(p, "w") as f:
+                json.dump(log, f, indent=2)
+        return True
+
+
+def get_lender_declines(lender_id: str) -> list:
+    """Returns the list of dealIds this lender has declined, all-time."""
+    if _USE_DB:
+        conn = _get_conn()
+        try:
+            rows = conn.run("SELECT deal_id FROM lender_declines WHERE lender_id=:lender_id", lender_id=lender_id)
+            return [r[0] for r in rows]
+        finally:
+            conn.close()
+    else:
+        _ensure_dirs()
+        p = os.path.join(LENDER_DECLINES_DIR, "log.json")
+        log = json.load(open(p)) if os.path.exists(p) else []
+        return [e["dealId"] for e in log if e["lenderId"] == lender_id]
 
 
 # ── Calloway Demo Seed ────────────────────────────────────────────────────────

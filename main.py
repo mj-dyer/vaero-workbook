@@ -3,7 +3,7 @@ AireLogix API v0.2
 FastAPI -- workbook generation + deal management
 """
 
-import io, re, tempfile, os, traceback
+import io, re, secrets, tempfile, os, traceback
 from datetime import datetime, timezone
 import httpx
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Depends
@@ -95,6 +95,30 @@ def _email_ioi_received(to: str, deal_id: str, aircraft: str, institution: str):
   </div>
 </div>"""
     _send_email(to, f"Term Sheet Received — {aircraft}", html)
+
+def _email_lender_portal_access(to: str, institution: str, link: str):
+    html = f"""
+<div style="font-family:sans-serif;max-width:560px;margin:0 auto;color:#1a1a2e;padding:32px 24px">
+  <img src="https://dev.vaerofinance.com/vaero_clean_logo_transparent.png" height="48" style="margin-bottom:24px"/>
+  <h2 style="font-size:22px;font-weight:600;margin-bottom:8px;color:#071428">Your Vaero Finance Lender Portal Access</h2>
+  <p style="color:#4a6480;font-size:15px;line-height:1.6;margin-bottom:24px">
+    <strong>{institution}</strong> has been approved on the Vaero Finance platform. Use the link below to access your
+    lender portal — no password required.
+  </p>
+  <div style="margin-bottom:24px">
+    <a href="{link}" style="display:inline-block;background:#c8a96e;color:#fff;font-weight:600;font-size:14px;padding:12px 28px;border-radius:4px;text-decoration:none;letter-spacing:0.04em">
+      Access Lender Portal →
+    </a>
+  </div>
+  <p style="color:#8a9ab0;font-size:12px;line-height:1.6">
+    This link is unique to your institution — please don't share it outside your organization. Contact
+    <a href="mailto:originations@vaerofinance.com" style="color:#c8a96e">originations@vaerofinance.com</a> if you need a new link.
+  </p>
+  <div style="border-top:1px solid #e8ecf0;margin-top:32px;padding-top:16px;font-size:11px;color:#b0bcc8">
+    Vaero Finance · Aviation Finance Intelligence · <a href="https://vaerofinance.com" style="color:#c8a96e">vaerofinance.com</a>
+  </div>
+</div>"""
+    _send_email(to, "Your Vaero Finance Lender Portal Access", html)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -111,6 +135,7 @@ from deals_store import (
     save_lead, mark_lead_converted,
     save_lender_application, list_lenders, get_lender, update_lender, delete_lender,
     record_distributions, get_deal_distributions, get_lender_distribution_stats,
+    record_lender_decline,
 )
 from bio_engine import generate_bio
 
@@ -224,6 +249,31 @@ def require_admin(user: dict = Depends(get_current_user)) -> dict:
     if not ADMIN_EMAILS or email not in ADMIN_EMAILS:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def generate_lender_portal_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def get_current_lender(request: Request) -> dict:
+    """Separate from get_current_user entirely -- lender portal access is a
+    plain opaque bearer token tied directly to a lender record (magic-link
+    auth, no password), not a Supabase JWT. Added 2026-11-23 specifically so
+    there's a real, unambiguous lender identity behind every IOI/decline
+    instead of a free-typed institution name. O(n) lookup over all lenders
+    per request -- fine at current lender-pool scale, revisit with a real
+    index if that pool gets large.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or malformed Authorization header")
+    token = auth_header[len("Bearer "):]
+    lender = next((l for l in list_lenders() if l.get("portalAccessToken") == token), None)
+    if not lender:
+        raise HTTPException(status_code=401, detail="Invalid or expired access link")
+    if lender.get("status") != "approved":
+        raise HTTPException(status_code=403, detail="This lender account is not currently approved")
+    return lender
 
 class WorkbookRequest(BaseModel):
     analysis: Any
@@ -805,13 +855,26 @@ def admin_get_lender(lender_id: str, user: dict = Depends(require_admin)):
 
 
 @app.patch("/admin/lenders/{lender_id}")
-def admin_update_lender(lender_id: str, update: LenderUpdate, user: dict = Depends(require_admin)):
+def admin_update_lender(lender_id: str, update: LenderUpdate, background_tasks: BackgroundTasks, user: dict = Depends(require_admin)):
     updates = update.dict(exclude_unset=True)
     if "status" in updates and updates["status"] not in ("pending", "approved", "declined", "inactive"):
         raise HTTPException(status_code=400, detail="Invalid status")
+    existing = get_lender(lender_id)
+    newly_approved = (
+        existing is not None and existing.get("status") != "approved"
+        and updates.get("status") == "approved"
+    )
+    if newly_approved and not existing.get("portalAccessToken"):
+        updates["portalAccessToken"] = generate_lender_portal_token()
     lender = update_lender(lender_id, updates)
     if lender is None:
         raise HTTPException(status_code=404, detail=f"Lender {lender_id} not found")
+    if newly_approved and lender.get("portalAccessToken"):
+        contacts = lender.get("contacts") or []
+        contact_email = contacts[0].get("email") if contacts else None
+        if contact_email:
+            link = f"https://lender.vaerofinance.com/?token={lender['portalAccessToken']}"
+            background_tasks.add_task(_email_lender_portal_access, contact_email, lender.get("institutionName", ""), link)
     return lender
 
 
@@ -823,6 +886,26 @@ def admin_delete_lender(lender_id: str, user: dict = Depends(require_admin)):
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Lender {lender_id} not found")
     return {"success": True, "lenderId": lender_id}
+
+
+@app.post("/admin/lenders/{lender_id}/resend-access")
+def admin_resend_lender_access(lender_id: str, background_tasks: BackgroundTasks, user: dict = Depends(require_admin)):
+    """Generates a portal access token if one doesn't exist, re-sends the
+    welcome email, and returns the link directly -- so Matt can copy it in
+    Control Tower for testing without needing to check email at all."""
+    lender = get_lender(lender_id)
+    if lender is None:
+        raise HTTPException(status_code=404, detail=f"Lender {lender_id} not found")
+    token = lender.get("portalAccessToken")
+    if not token:
+        token = generate_lender_portal_token()
+        lender = update_lender(lender_id, {"portalAccessToken": token})
+    link = f"https://lender.vaerofinance.com/?token={token}"
+    contacts = lender.get("contacts") or []
+    contact_email = contacts[0].get("email") if contacts else None
+    if contact_email:
+        background_tasks.add_task(_email_lender_portal_access, contact_email, lender.get("institutionName", ""), link)
+    return {"success": True, "lenderId": lender_id, "accessLink": link, "emailedTo": contact_email}
 
 
 # A deal's identity stays withheld from lenders until the borrower has
@@ -875,7 +958,7 @@ def _strip_internal_rating(analysis):
 
 
 @app.get("/deals")
-def get_deals(user: dict = Depends(get_current_user)):
+def get_deals(lender: dict = Depends(get_current_lender)):
     try:
         deals = list_deals()
         queue = []
@@ -942,7 +1025,7 @@ def get_my_deal(user: dict = Depends(get_current_user)):
 
 
 @app.get("/deals/{deal_id}")
-def get_deal(deal_id: str, user: dict = Depends(get_current_user)):
+def get_deal(deal_id: str, lender: dict = Depends(get_current_lender)):
     deal = load_deal(deal_id)
     if not deal:
         raise HTTPException(status_code=404, detail=f"Deal {deal_id} not found")
@@ -958,7 +1041,7 @@ def get_deal(deal_id: str, user: dict = Depends(get_current_user)):
 
 
 @app.get("/deals/{deal_id}/spec")
-def get_deal_spec(deal_id: str, user: dict = Depends(get_current_user)):
+def get_deal_spec(deal_id: str, lender: dict = Depends(get_current_lender)):
     deal = load_deal(deal_id)
     if not deal:
         raise HTTPException(status_code=404, detail=f"Deal {deal_id} not found")
@@ -1018,12 +1101,17 @@ def archive_deal(deal_id: str, user: dict = Depends(get_current_user)):
 
 
 @app.post("/deals/{deal_id}/ioi")
-def submit_ioi(deal_id: str, ioi: IOISubmission, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
+def submit_ioi(deal_id: str, ioi: IOISubmission, background_tasks: BackgroundTasks, lender: dict = Depends(get_current_lender)):
     deal = load_deal(deal_id)
     if not deal:
         raise HTTPException(status_code=404, detail=f"Deal {deal_id} not found")
     try:
         ioi_data = ioi.dict()
+        # institution/lenderId come from the authenticated lender record, not
+        # whatever the client typed -- fixes the fragile name-matching this
+        # used to rely on entirely, at the source.
+        ioi_data["institution"] = lender.get("institutionName", "")
+        ioi_data["lenderId"] = lender.get("lenderId", "")
         ioi_id = save_ioi(deal_id, ioi_data)
         borrower_email = deal.get("borrowerEmail", "")
         if borrower_email:
@@ -1037,6 +1125,28 @@ def submit_ioi(deal_id: str, ioi: IOISubmission, background_tasks: BackgroundTas
         return {"success": True, "ioiId": ioi_id, "dealId": deal_id, "refNum": f"IOI-{ioi_id}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/lender/me")
+def get_lender_me(lender: dict = Depends(get_current_lender)):
+    """Lets the portal know who's logged in -- institution name, contact
+    info, appetite -- without needing a password-based session anywhere."""
+    safe = dict(lender)
+    safe.pop("portalAccessToken", None)
+    return safe
+
+
+@app.post("/deals/{deal_id}/decline")
+def decline_deal(deal_id: str, lender: dict = Depends(get_current_lender)):
+    """Real per-lender decline -- deliberately does NOT touch the deal's own
+    status field (that's what the older 'Pass on Deal' -> PATCH /status
+    action did, which meant one lender passing marked the whole deal passed
+    for every lender on a multi-lender distribution). Idempotent."""
+    deal = load_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail=f"Deal {deal_id} not found")
+    record_lender_decline(deal_id, lender.get("lenderId", ""))
+    return {"success": True, "dealId": deal_id}
 
 
 @app.get("/deals/{deal_id}/ioi")
