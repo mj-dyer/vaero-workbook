@@ -240,6 +240,7 @@ class DealSubmission(BaseModel):
     loanPrefs: dict
     borrowerType: Optional[str] = "individual"
     transactionType: Optional[str] = "purchase"
+    aircraftOwnership: Optional[str] = "whole"  # "whole" | "fractional" -- borrower's own stated intent
     profile: Optional[dict] = {}
     pgType: Optional[str] = None
     guarantorType: Optional[str] = None
@@ -394,6 +395,7 @@ def submit_deal(request: Request, submission: DealSubmission, background_tasks: 
             "analysis": analysis,
             "transactionType": data.get("transactionType", "purchase"),
             "borrowerType": data.get("borrowerType", "individual"),
+            "aircraftOwnership": data.get("aircraftOwnership", "whole"),
             "profile": data.get("profile", {}),
             "loanPrefs": data.get("loanPrefs", {}),
             "pgType": data.get("pgType") or "",
@@ -674,6 +676,7 @@ def admin_seed_routing_test_batch(user: dict = Depends(require_admin)):
                 "analysis": analysis,
                 "transactionType": data.get("transactionType", "purchase"),
                 "borrowerType": data.get("borrowerType", "individual"),
+                "aircraftOwnership": data.get("aircraftOwnership", "whole"),
                 "profile": data.get("profile", {}),
                 "loanPrefs": data.get("loanPrefs", {}),
                 "pgType": data.get("pgType") or "",
@@ -697,10 +700,12 @@ def admin_get_matched_lenders(deal_id: str, user: dict = Depends(require_admin))
     transaction = analysis.get("transaction") or {}
     pg_type = deal.get("pgType", "")
     all_lenders = list_lenders()
-    # Fractional-share intake isn't captured on the borrower side yet (separate,
-    # still-in-design pathway) -- always False here until that field exists.
+    # "Plumbing" built 2026-11-23, per Matt -- not a routing priority yet,
+    # but the borrower's own stated intent (aircraftOwnership) now actually
+    # reaches match_fractional() instead of being hardcoded False.
+    is_fractional_share = deal.get("aircraftOwnership") == "fractional"
     result = match_lenders(
-        aircraft, pg_type, all_lenders, is_fractional_share=False,
+        aircraft, pg_type, all_lenders, is_fractional_share=is_fractional_share,
         loan_amount=transaction.get("loanAmount"), deal_ltv_fraction=transaction.get("ltv"),
     )
     lenders_by_id = {l.get("lenderId"): l for l in all_lenders}
@@ -717,7 +722,7 @@ def admin_get_matched_lenders(deal_id: str, user: dict = Depends(require_admin))
     if len(result["matchedLenders"]) < 3:
         result["relaxations"] = suggest_relaxations(
             aircraft, pg_type, transaction.get("loanAmount"), transaction.get("ltv"),
-            all_lenders, is_fractional_share=False,
+            all_lenders, is_fractional_share=is_fractional_share,
         )
     else:
         result["relaxations"] = None
