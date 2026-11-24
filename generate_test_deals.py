@@ -52,7 +52,11 @@ def _submission(idx, label, make, model, price, pg_type,
         "purchasePrice": price,
         "hangarIdent": hangar_ident,
         "thirdPartyCharter": "yes" if charter_operator_type else "no",
-        "charterPct": charter_pct,
+        # The real wizard sends charterPct as a fraction (0.35 = 35%), already
+        # divided by 100 client-side -- charter_pct here is passed in as a
+        # plain percentage number (15, 80, ...) for readability in SCENARIOS
+        # below, so convert it the same way here.
+        "charterPct": charter_pct / 100,
         "charterOperatorType": charter_operator_type,
         "aircraftCondition": aircraft_condition,
         "constructionFinancingNeeded": construction_financing_needed,

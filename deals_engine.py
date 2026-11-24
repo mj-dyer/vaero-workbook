@@ -544,37 +544,53 @@ def get_balloon(loan: float, year: int, term_months: int,
     return loan * ((1 - depr_rate) ** term_years)
 
 
-# Third-party charter utilization deduct — house policy, calibrated 2026-09-24.
+# Third-party charter utilization deduct — house policy, re-derived 2026-11-23.
+# Applies directly as a percentage haircut on FFMV at the given future term --
+# NOT a dollar amount amortized over the loan term subtracted from the
+# balloon (that was the pre-2026-11-23 shape; replaced, not kept alongside
+# this, to avoid double-counting the same real-world effect twice).
+#
 # No deduct at or below 20% charter (confirmed by existing "Valuations assume
-# charter usage <20%" disclaimer already in the borrower app). Above 20%, a
-# real 2016 XLS+ deal (35% charter, lender-quoted balloons at 60mo/84mo)
-# implied a total value penalty of ~10% of purchase price, amortized evenly
-# over the loan term (deduct = total_pool / term_years — matched both real
-# balloons within ~2.5%). Only two rounded data points from one lender on one
-# deal exist above the threshold, so the shape between 20% and 35% (and above
-# 35%) is a linear extrapolation through those two points, not a validated
-# curve — revisit if a second real deal at a different charter% surfaces.
+# charter usage <20%" disclaimer already in the borrower app). Re-derived
+# directly from a real 2016 XLS+ deal, purchase price $10,250,000: lender-
+# quoted effective balloons of $6,601,000 (60mo) and $5,919,000 (84mo) against
+# baseline (charter-blind) projected FFMVs of $6,770,000 (60mo) and $6,071,000
+# (84mo) at 35% charter utilization -- both gaps land at 2.5% of that term's
+# baseline FFMV ($169,250 and $151,775 respectively), confirming the deduct is
+# a straight FFMV percentage, not a dollar amount tied to purchase price or
+# term length. Only one real data point (35%) exists above the threshold, so
+# the slope from 20%->35% is a linear extrapolation through that single
+# point, not a validated curve — revisit if a second real deal at a
+# different charter% surfaces.
 # Aircraft-agnostic: charter wear/utilization risk isn't airframe-specific the
-# way the collateral curves are, so this applies uniformly across XLS+/CL350/G550.
-CHARTER_DEDUCT_THRESHOLD = 0.20       # no deduct at or below this utilization
-CHARTER_DEDUCT_CALIBRATION_PCT = 0.35  # the real deal's charter utilization
-CHARTER_DEDUCT_CALIBRATION_POOL = 0.10  # ...implied this total penalty, as a fraction of PP
+# way the collateral curves are, so this applies uniformly across every
+# aircraft -- XLS+/CL350/G550's dedicated curves and the generic fallback alike.
+CHARTER_DEDUCT_THRESHOLD = 0.20          # no deduct at or below this utilization
+CHARTER_DEDUCT_CALIBRATION_PCT = 0.35     # the real deal's charter utilization
+CHARTER_DEDUCT_CALIBRATION_HAIRCUT = 0.025  # ...implied this % haircut on FFMV at that term
 
 
-def get_charter_deduct(purchase_price: float, charter_pct: float, term_months: int) -> float:
-    """
-    Dollar deduct to subtract from the loan-balance balloon (get_balloon()) for
-    third-party charter utilization above the no-deduct threshold. Returns 0
-    below the threshold. charter_pct is a fraction (0.35 = 35%), not bps.
-    """
-    if not purchase_price or not term_months or charter_pct <= CHARTER_DEDUCT_THRESHOLD:
+def get_charter_ffmv_deduct_fraction(charter_pct: float) -> float:
+    """Fraction of FFMV to haircut for third-party charter utilization above
+    the no-deduct threshold. Returns 0 below the threshold. charter_pct is a
+    fraction (0.35 = 35%), not bps."""
+    if charter_pct <= CHARTER_DEDUCT_THRESHOLD:
         return 0.0
-    pool_pct = (CHARTER_DEDUCT_CALIBRATION_POOL /
-                (CHARTER_DEDUCT_CALIBRATION_PCT - CHARTER_DEDUCT_THRESHOLD)
-                ) * (charter_pct - CHARTER_DEDUCT_THRESHOLD)
-    total_pool = pool_pct * purchase_price
-    term_years = term_months / 12
-    return total_pool / term_years
+    slope = CHARTER_DEDUCT_CALIBRATION_HAIRCUT / (CHARTER_DEDUCT_CALIBRATION_PCT - CHARTER_DEDUCT_THRESHOLD)
+    return slope * (charter_pct - CHARTER_DEDUCT_THRESHOLD)
+
+
+def get_charter_adjusted_fmv_at_maturity(fmv: float, year: int, term_months: int,
+                                          make: str, model: str, charter_pct: float) -> tuple:
+    """Wraps get_projected_fmv_at_maturity() -- computes baseline (charter-
+    blind) FFMV at the given future term using the already-established
+    depreciation logic, unchanged, then applies the charter haircut on top.
+    Returns (adjusted_fmv, baseline_fmv, deduct_dollars) -- all three are
+    useful for display (e.g. "FFMV: $X, after $Y charter-usage deduct")."""
+    baseline_fmv = get_projected_fmv_at_maturity(fmv, year, term_months, make, model)
+    deduct_fraction = get_charter_ffmv_deduct_fraction(charter_pct or 0)
+    deduct_dollars = deduct_fraction * baseline_fmv
+    return baseline_fmv - deduct_dollars, baseline_fmv, deduct_dollars
 
 
 # ── GDSCR scoring (Factor 1) ──────────────────────────────────────────────────
@@ -945,11 +961,12 @@ def run_analysis(submission: dict) -> dict:
     )
 
     balloon_pmt = get_balloon(loan_amount, aircraft_year, term_months, aircraft_make, aircraft_model)
-    balloon_pmt -= get_charter_deduct(purchase_price, charter_pct, term_months)
     monthly_pmt = monthly_payment(loan_amount, illustrative_rate, term_months, balloon_pmt)
     annual_aircraft_ds = monthly_pmt * 12
-    projected_fmv_at_maturity = get_projected_fmv_at_maturity(
-        fmv, aircraft_year, term_months, aircraft_make, aircraft_model
+    # charter_pct arrives as a true fraction (0.35 = 35%) -- the borrower
+    # wizard already divides by 100 before sending it.
+    projected_fmv_at_maturity, projected_fmv_at_maturity_baseline, charter_fmv_deduct = get_charter_adjusted_fmv_at_maturity(
+        fmv, aircraft_year, term_months, aircraft_make, aircraft_model, charter_pct
     )
 
     # Existing debt service
@@ -1467,6 +1484,8 @@ def run_analysis(submission: dict) -> dict:
             "fmv_used": round(fmv),
             "estimatedFMV": round(fmv),
             "projectedFmvAtMaturity": round(projected_fmv_at_maturity),
+            "projectedFmvAtMaturityBaseline": round(projected_fmv_at_maturity_baseline),
+            "charterFmvDeduct": round(charter_fmv_deduct),
             "ltv_on_curve_fmv": round(ltv_vs_fmv * 100, 1),
             "ltv_on_purchase_price": round(ltv * 100, 1),
             "curveName": (
