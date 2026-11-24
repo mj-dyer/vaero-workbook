@@ -209,6 +209,13 @@ def match_geography(deal_state, geography_scope, geography_states):
     return deal_state in (geography_states or [])
 
 
+# Platform-wide floor, not a lender preference -- distinct from any
+# individual lender's own dealSizeMin. Vaero doesn't take deals under this
+# amount regardless of whether some lender's stated minimum happens to be
+# lower. Confirmed by Matt 2026-11-23.
+PLATFORM_MIN_LOAN_AMOUNT = 1_000_000
+
+
 def match_loan_size(loan_amount, deal_size_min, deal_size_max):
     """dealSizeMin/dealSizeMax are real operational limits (underwriting
     capacity, balance-sheet concentration), not a negotiable term -- a lender
@@ -297,6 +304,25 @@ def match_lenders(deal_aircraft, pg_type, lenders, is_fractional_share=False,
     hangar_ident = deal_aircraft.get("hangarIdent", "")
     deal_state = resolve_state(hangar_ident)
 
+    # Platform floor short-circuits before any per-lender evaluation -- this
+    # isn't a lender-by-lender eligibility question, it's a blanket "Vaero
+    # doesn't do deals this small" policy. No point running every lender
+    # through a redundant identical exclusion reason.
+    if loan_amount is not None and loan_amount < PLATFORM_MIN_LOAN_AMOUNT:
+        return {
+            "aircraftCategory": category,
+            "aircraftCategoryExactMatch": is_exact,
+            "aircraftBaseState": deal_state,
+            "matchedLenders": [],
+            "allResults": [],
+            "flags": [{
+                "severity": "CRITICAL",
+                "title": "Below Platform Minimum Loan Amount",
+                "detail": f"Requested loan amount of ${loan_amount:,.0f} is below Vaero's ${PLATFORM_MIN_LOAN_AMOUNT:,.0f} minimum. Not eligible for routing regardless of individual lender appetite.",
+                "mitigant": None,
+            }],
+        }
+
     all_results = []
     for lender in lenders:
         if lender.get("status") != "approved":
@@ -310,7 +336,10 @@ def match_lenders(deal_aircraft, pg_type, lenders, is_fractional_share=False,
         if not match_fractional(is_fractional_share, lender.get("fractionalShareAppetite")):
             reasons.append("Fractional share: lender isn't open to fractional interests.")
         if not match_charter(charter_operator_type, lender.get("thirdPartyCharterAppetite"), lender.get("charterOperatorFinancingAppetite")):
-            reasons.append("Charter: lender's charter appetite doesn't cover this deal's charter usage.")
+            if charter_operator_type == "operator":
+                reasons.append("Charter operator financing: lender isn't open to deals where charter income is the primary repayment source.")
+            else:
+                reasons.append("Charter: lender isn't open to incidental 3rd-party charter usage.")
         if not match_construction_financing(aircraft_condition, construction_financing_needed, lender.get("constructionFinancingAppetite")):
             reasons.append("Construction financing: lender isn't open to progress-payment financing.")
         if not match_geography(deal_state, lender.get("geographyScope"), lender.get("geographyStates")):
@@ -428,7 +457,7 @@ def rank_and_cap(matched_lenders, lenders_by_id, cap=8, deal_time_sensitive=Fals
 # structured reasonCode because reasons are meant to read as plain English
 # in the Control Tower UI already; splitting that into code+text felt like
 # more machinery than this needed given both live in the same file.
-FIXED_DIMENSION_PREFIXES = ("Aircraft category", "Geography", "Deal size")
+FIXED_DIMENSION_PREFIXES = ("Aircraft category", "Geography", "Deal size", "Charter operator financing")
 
 
 def suggest_relaxations(deal_aircraft, pg_type, loan_amount, deal_ltv_fraction, lenders, is_fractional_share=False):
@@ -475,6 +504,30 @@ def suggest_relaxations(deal_aircraft, pg_type, loan_amount, deal_ltv_fraction, 
             suggestions.append({
                 "dimension": "recourse",
                 "change": "Offer a full personal guarantee instead of requesting non-recourse/limited-recourse terms.",
+                "unlockCount": len(new_ids),
+                "unlockedLenderIds": sorted(new_ids),
+            })
+
+    # ── Incidental charter relaxation ─────────────────────────────────────
+    # Binary, not percentage-based -- charter percentage was never a match
+    # gate to begin with (see match_charter/the FFMV deduct discussion), so
+    # the only real lever is dropping 3rd-party charter use entirely.
+    # Charter-operator financing (charter income as the primary repayment
+    # source) is deliberately NOT modeled here -- that's a fixed fact about
+    # the deal's purpose, not a preference a borrower can restructure around;
+    # see FIXED_DIMENSION_PREFIXES instead.
+    if deal_aircraft.get("charterOperatorType") == "incidental":
+        no_charter_aircraft = dict(deal_aircraft)
+        no_charter_aircraft["charterOperatorType"] = ""
+        counterfactual = match_lenders(
+            no_charter_aircraft, pg_type, lenders, is_fractional_share=is_fractional_share,
+            loan_amount=loan_amount, deal_ltv_fraction=deal_ltv_fraction,
+        )
+        new_ids = set(r["lenderId"] for r in counterfactual["matchedLenders"]) - baseline_matched_ids
+        if new_ids:
+            suggestions.append({
+                "dimension": "charter",
+                "change": "Drop 3rd-party charter usage entirely.",
                 "unlockCount": len(new_ids),
                 "unlockedLenderIds": sorted(new_ids),
             })

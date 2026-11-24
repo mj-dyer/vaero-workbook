@@ -530,6 +530,7 @@ class LenderApplication(BaseModel):
     maxLtv: Optional[float] = None
     dealSizeMin: Optional[float] = None
     dealSizeMax: Optional[float] = None
+    fullyAmortizingMaxDealSize: Optional[float] = None  # only meaningful when structureAppetite includes "fully_amortizing"
     thirdPartyCharterAppetite: Optional[bool] = False  # opt-in; maxCharterPct only meaningful when true
     maxCharterPct: Optional[float] = None  # Part 135 3rd party charter appetite, 0-100
     charterOperatorFinancingAppetite: Optional[bool] = False  # open to deals where repayment source is primarily charter income
@@ -596,6 +597,7 @@ class LenderUpdate(BaseModel):
     maxLtv: Optional[float] = None
     dealSizeMin: Optional[float] = None
     dealSizeMax: Optional[float] = None
+    fullyAmortizingMaxDealSize: Optional[float] = None  # only meaningful when structureAppetite includes "fully_amortizing"
     thirdPartyCharterAppetite: Optional[bool] = None
     maxCharterPct: Optional[float] = None
     charterOperatorFinancingAppetite: Optional[bool] = None

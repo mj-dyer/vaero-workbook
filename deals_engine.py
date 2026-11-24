@@ -593,6 +593,36 @@ def get_charter_adjusted_fmv_at_maturity(fmv: float, year: int, term_months: int
     return baseline_fmv - deduct_dollars, baseline_fmv, deduct_dollars
 
 
+# Direct operating cost (DOC) per flight hour, by aircraft category -- fuel,
+# maintenance labor/parts, and engine-program reserves. NOT a charter
+# customer's billing rate (those run meaningfully higher -- they bake in
+# operator margin, repositioning, crew overnights, etc.) and NOT the same
+# thing as a per-hour ownership "all-in" figure some sources quote. Rough
+# category-level estimates synthesized from Conklin & de Decker-derived
+# industry sources (GlobalAir operating cost reports, flycraft.com, AOPA),
+# searched 2026-11-22 -- directional by category, not a precise per-tail-
+# number figure. Deliberately a DISPLAY-ONLY line item: this does NOT feed
+# into the GDSCR calculation or qualifying income anywhere in this file --
+# see run_analysis's "transaction" dict for where it's surfaced instead.
+OPERATING_COST_PER_HOUR = {
+    "piston": 350,
+    "turboprop": 1100,
+    "vlj": 1300,
+    "light_jet": 1950,
+    "midsize_jet": 2800,
+    "super_mid_jet": 3200,
+    "large_jet": 4000,
+    "ultra_long_range": 5750,
+}
+
+
+def estimate_annual_operating_cost(category: str, annual_hours: float) -> float:
+    rate = OPERATING_COST_PER_HOUR.get(category)
+    if not rate or not annual_hours:
+        return 0.0
+    return rate * annual_hours
+
+
 # ── GDSCR scoring (Factor 1) ──────────────────────────────────────────────────
 
 
@@ -968,6 +998,10 @@ def run_analysis(submission: dict) -> dict:
     projected_fmv_at_maturity, projected_fmv_at_maturity_baseline, charter_fmv_deduct = get_charter_adjusted_fmv_at_maturity(
         fmv, aircraft_year, term_months, aircraft_make, aircraft_model, charter_pct
     )
+
+    aircraft_category_for_opex, _ = classify_aircraft(aircraft_make, aircraft_model)
+    annual_utilization_hours = float(aircraft_data.get("annualUtilizationHours", 0) or 0)
+    estimated_annual_operating_cost = estimate_annual_operating_cost(aircraft_category_for_opex, annual_utilization_hours)
 
     # Existing debt service
     existing_annual_ds = float(str(financial.get("existingDebt", "0")).replace(",", "") or 0)
@@ -1470,6 +1504,8 @@ def run_analysis(submission: dict) -> dict:
             # "yes" | "no" | "maybe" -- "maybe" routes to a lender pool mixing both
             "constructionFinancingNeeded": aircraft_data.get("constructionFinancingNeeded", ""),
             "anticipatedClosingDate": aircraft_data.get("anticipatedClosingDate", ""),
+            "annualUtilizationHours": aircraft_data.get("annualUtilizationHours", 0),
+            "managementStyle": aircraft_data.get("managementStyle", ""),
         },
         "collateral": {
             "year": aircraft_year,
@@ -1508,6 +1544,7 @@ def run_analysis(submission: dict) -> dict:
             "annualAircraftDS": round(annual_aircraft_ds),
             "existingAnnualDS": round(existing_annual_ds),
             "totalProFormaDS": round(total_pro_forma_ds),
+            "estimatedAnnualOperatingCost": round(estimated_annual_operating_cost),
         },
         "incomeNormalization": income_normalization,
         "gdscr": {
