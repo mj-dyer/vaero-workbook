@@ -11,6 +11,7 @@ of those decisions into code, not a reinterpretation of them.
 import json
 import os
 import re
+from datetime import date, datetime
 
 _AIRPORT_STATES_PATH = os.path.join(os.path.dirname(__file__), "airport_states.json")
 with open(_AIRPORT_STATES_PATH) as _f:
@@ -403,6 +404,32 @@ _SPEED_RANK = {"1_2_weeks": 3, "2_4_weeks": 2, "30_45_days": 1, "45_60_days": 0}
 # the deal itself is flagged urgent. Deliberately smaller than the spread
 # between speed tiers (0-3) so it nudges, rather than overrides, baseline speed.
 _URGENCY_BONUS = 2
+
+# Confirmed with Matt 2026-11-23: a deal is time-sensitive if its stated
+# closing/delivery date is within this many days of today.
+TIME_SENSITIVE_THRESHOLD_DAYS = 30
+
+
+def is_deal_time_sensitive(aircraft_condition, anticipated_closing_date, anticipated_delivery_date,
+                            threshold_days=TIME_SENSITIVE_THRESHOLD_DAYS, today=None):
+    """Derives urgency directly from dates the borrower already provides --
+    no separate "is this urgent" question needed. Uses anticipatedDeliveryDate
+    for new-aircraft deals, anticipatedClosingDate for pre-owned (the wizard
+    never populates both for the same deal). Dates arrive as MM/DD/YYYY
+    strings (the borrower wizard's DatePicker format, not ISO). A date
+    already in the past still counts as time-sensitive (more so, if
+    anything) -- only a missing/unparseable date returns False, never an
+    error, since this must never block routing on bad date input.
+    """
+    date_str = anticipated_delivery_date if aircraft_condition == "new" else anticipated_closing_date
+    if not date_str:
+        return False
+    try:
+        target = datetime.strptime(date_str, "%m/%d/%Y").date()
+    except (ValueError, TypeError):
+        return False
+    today = today or date.today()
+    return (target - today).days <= threshold_days
 
 
 def rank_and_cap(matched_lenders, lenders_by_id, cap=8, deal_time_sensitive=False):

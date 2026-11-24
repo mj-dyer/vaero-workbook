@@ -103,7 +103,7 @@ from typing import Any, List, Optional
 from generate_workbook import generate_workbook
 from generate_memo import generate_memo
 from deals_engine import run_analysis
-from routing_engine import match_lenders, rank_and_cap, suggest_relaxations
+from routing_engine import match_lenders, rank_and_cap, suggest_relaxations, is_deal_time_sensitive
 from deals_store import (
     save_deal, load_deal, list_deals, list_deals_by_user, list_deals_admin,
     update_deal_status, save_ioi, load_iois, generate_deal_id,
@@ -704,9 +704,14 @@ def admin_get_matched_lenders(deal_id: str, user: dict = Depends(require_admin))
         loan_amount=transaction.get("loanAmount"), deal_ltv_fraction=transaction.get("ltv"),
     )
     lenders_by_id = {l.get("lenderId"): l for l in all_lenders}
-    # deal_time_sensitive isn't a real deal-side field yet -- see rank_and_cap's
-    # docstring; always False until that's built.
-    result["ranking"] = rank_and_cap(result["matchedLenders"], lenders_by_id, cap=8, deal_time_sensitive=False)
+    # Derived directly from the borrower's own stated closing/delivery date --
+    # no separate "is this urgent" question needed. See is_deal_time_sensitive's
+    # docstring; confirmed 30-day threshold with Matt 2026-11-23.
+    deal_time_sensitive = is_deal_time_sensitive(
+        aircraft.get("aircraftCondition"), aircraft.get("anticipatedClosingDate"), aircraft.get("anticipatedDeliveryDate"),
+    )
+    result["ranking"] = rank_and_cap(result["matchedLenders"], lenders_by_id, cap=8, deal_time_sensitive=deal_time_sensitive)
+    result["dealTimeSensitive"] = deal_time_sensitive
     # Only worth computing when matches are thin -- a healthy match count
     # doesn't need a "how to get more lenders" suggestion.
     if len(result["matchedLenders"]) < 3:
