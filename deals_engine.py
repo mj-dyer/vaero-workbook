@@ -957,7 +957,12 @@ def run_analysis(submission: dict) -> dict:
 
     first_name = personal.get("firstName", "")
     last_name = personal.get("lastName", "")
-    borrower_name = f"{first_name} {last_name}".strip() or "Borrower"
+    # For corporate borrowers, personal.firstName holds the Legal Entity
+    # Name and personal.lastName holds the State of Formation (see the
+    # Company Information step) -- concatenating them as "first last" like
+    # the individual-borrower case produced names like "Acme Corp DE",
+    # the state tacked onto the end of the company name.
+    borrower_name = (first_name.strip() if borrower_type == "private_company" else f"{first_name} {last_name}".strip()) or "Borrower"
     email = personal.get("email", "")
 
     aircraft_year = int(aircraft_data.get("year", 2015))
