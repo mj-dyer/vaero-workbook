@@ -299,6 +299,7 @@ class DealSubmission(BaseModel):
     speType: Optional[str] = None  # "personal" | "operating_co" | "separate_entity"
     spe_guarantorType: Optional[str] = None  # "operating_co" | "individual" | "both" -- only when speType=="separate_entity"
     specSheet: Optional[dict] = None  # {base64: str, filename: str}
+    documentsSummary: Optional[list] = None  # [{categoryId, label, uploaded: bool}] -- which document categories the borrower actually uploaded something to, for lender-facing pre-engagement visibility
     submittedDate: Optional[str] = None  # client-computed local date (YYYY-MM-DD) — server has no reliable way to know the borrower's timezone
 
 class StatusUpdate(BaseModel):
@@ -440,6 +441,7 @@ def submit_deal(request: Request, submission: DealSubmission, background_tasks: 
             data["profile"]["yearsInOperation"] = corp_financial.get("yearsInOperation", "")
             data["profile"]["financialStatementQuality"] = corp_financial.get("financialStatementQuality", "")
             data["profile"]["taxReturnsProvided"] = bool(corp_financial.get("taxReturnsProvided", False))
+            data["profile"]["docsChecklist"] = corp_financial.get("docsChecklist", {})
 
         # The corporate (private_company) wizard path never asks the
         # individual-borrower pgType question ("full_pg" vs "non_recourse")
@@ -493,6 +495,7 @@ def submit_deal(request: Request, submission: DealSubmission, background_tasks: 
             "aircraftOwnership": data.get("aircraftOwnership", "whole"),
             "profile": data.get("profile", {}),
             "loanPrefs": data.get("loanPrefs", {}),
+            "documentsSummary": data.get("documentsSummary") or [],
             "pgType": data.get("pgType") or "",
             "guarantorType": data.get("guarantorType") or "",
             "principalPGAvailable": data.get("principalPGAvailable") or "",
