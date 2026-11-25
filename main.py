@@ -296,6 +296,8 @@ class DealSubmission(BaseModel):
     pgType: Optional[str] = None
     guarantorType: Optional[str] = None
     principalPGAvailable: Optional[str] = None
+    speType: Optional[str] = None  # "personal" | "operating_co" | "separate_entity"
+    spe_guarantorType: Optional[str] = None  # "operating_co" | "individual" | "both" -- only when speType=="separate_entity"
     specSheet: Optional[dict] = None  # {base64: str, filename: str}
     submittedDate: Optional[str] = None  # client-computed local date (YYYY-MM-DD) — server has no reliable way to know the borrower's timezone
 
@@ -429,6 +431,24 @@ def submit_deal(request: Request, submission: DealSubmission, background_tasks: 
             "contactName": personal.get("contactName", ""),
             "contactTitle": personal.get("contactTitle", ""),
         })
+
+        # The corporate (private_company) wizard path never asks the
+        # individual-borrower pgType question ("full_pg" vs "non_recourse")
+        # -- it captures recourse structure differently via speType
+        # (is the borrowing entity the operating company itself, or a
+        # purpose-built SPE?) and spe_guarantorType (who stands behind an
+        # SPE's obligation). Every path the wizard currently exposes has
+        # SOME real obligor beyond the aircraft -- the operating company,
+        # an individual, or both -- there's no true non-recourse/
+        # asset-only option yet. Leaving pgType unset here (the old
+        # behavior) silently defaulted every corporate deal to
+        # "non_recourse", excluding it from every full-recourse-only
+        # lender regardless of what the borrower actually indicated.
+        if data.get("borrowerType") == "private_company":
+            spe_type = data.get("speType", "")
+            spe_guarantor = data.get("spe_guarantorType", "")
+            if spe_type == "operating_co" or spe_guarantor in ("operating_co", "individual", "both"):
+                data["pgType"] = "full_pg"
 
         deal = {
             "dealId": deal_id,

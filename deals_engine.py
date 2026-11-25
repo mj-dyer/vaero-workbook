@@ -835,16 +835,41 @@ def compute_guarantor_package(
     net_worth: float,
     loan_amount: float,
     borrower_name: str,
+    spe_type: str = "",
+    spe_guarantor_type: str = "",
 ) -> dict:
     is_corp = borrower_type in ("corporate", "private_company", "company")
     liq_cov = round(liquid_assets / loan_amount, 2) if loan_amount > 0 else 0
     nw_cov  = round(net_worth / loan_amount, 2) if loan_amount > 0 else 0
 
     if is_corp:
-        if principal_pg_avail == "yes":
-            pkg_type   = "Corporate + Principal PG Available"
-            recourse   = "full_recourse"
-            composition = "Corporate entity + willing principals"
+        # speType tells us whether the borrowing entity IS the operating
+        # company (the standard, common case -- the company itself is
+        # fully liable, which is full recourse to that entity) or a
+        # purpose-built SPE, in which case spe_guarantorType says who
+        # actually stands behind the SPE's obligation. principal_pg_avail
+        # is a separate, additional signal -- whether individual
+        # principals would ALSO personally guarantee on top of the
+        # entity's own obligation -- not the baseline recourse
+        # determination. Treating "no principal PG" as equivalent to
+        # "non-recourse" (the old behavior here) was wrong: a standard
+        # corporate deal where the company itself is the borrower of
+        # record is full recourse regardless of whether an individual
+        # additionally signs on.
+        has_entity_recourse = spe_type == "operating_co" or spe_guarantor_type in ("operating_co", "individual", "both")
+        if has_entity_recourse:
+            recourse = "full_recourse"
+            if spe_type == "operating_co":
+                composition = "Operating company (borrower of record)"
+                pkg_type = "Full Recourse — Operating Company"
+            elif spe_guarantor_type in ("operating_co", "both"):
+                composition = "SPE backed by affiliated operating company" + (" + individual guarantor(s)" if spe_guarantor_type == "both" else "")
+                pkg_type = "Full Recourse — SPE Backed by Operating Company"
+            else:
+                composition = "SPE backed by individual guarantor(s)"
+                pkg_type = "Full Recourse — SPE Backed by Individual Guarantor(s)"
+            if principal_pg_avail == "yes":
+                composition += " + willing principals"
             if nw_cov >= 3 and liq_cov >= 0.3:
                 strength = "Strong"
             elif nw_cov >= 1:
@@ -852,26 +877,16 @@ def compute_guarantor_package(
             else:
                 strength = "Limited"
             narrative = (
-                "Principals have indicated willingness to provide personal guarantees if required or beneficial. "
-                "Combined with corporate balance sheet, this positions the credit competitively with full-recourse "
-                f"lenders. Entity net worth coverage {nw_cov:.1f}x loan; liquid coverage {liq_cov:.2f}x."
-            )
-        elif principal_pg_avail == "no":
-            pkg_type   = "Corporate Only — No Principal PG"
-            recourse   = "corporate_only"
-            composition = "Corporate entity — no personal guarantee"
-            strength   = "Corporate Recourse Only"
-            narrative  = (
-                "Borrower has indicated principals will not provide personal guarantees. Credit underwriting "
-                "relies on entity strength only. Lenders offering corporate non-recourse or limited-recourse "
-                "structures are the appropriate pool."
-            )
+                f"{composition}. Entity net worth coverage {nw_cov:.1f}x loan; liquid coverage {liq_cov:.2f}x. "
+                + ("Principals have additionally indicated willingness to provide personal guarantees if required or beneficial."
+                   if principal_pg_avail == "yes" else "")
+            ).strip()
         else:
-            pkg_type   = "Corporate — PG Availability Not Indicated"
+            pkg_type   = "Corporate — Recourse Structure Not Specified"
             recourse   = "unknown"
             composition = "Not specified"
             strength   = "Unknown"
-            narrative  = "Corporate borrower — guarantee structure not specified in application."
+            narrative  = "Corporate borrower — entity/guarantor structure not specified in application. Defaulting to the more conservative non-recourse lender pool for matching until clarified."
     else:
         # Individual borrower
         if pg_type == "non_recourse":
@@ -945,6 +960,8 @@ def run_analysis(submission: dict) -> dict:
     pg_type = submission.get("pgType") or ""
     guarantor_type = submission.get("guarantorType") or ""
     principal_pg_avail = submission.get("principalPGAvailable") or ""
+    spe_type = submission.get("speType") or ""
+    spe_guarantor_type = submission.get("spe_guarantorType") or ""
 
     first_name = personal.get("firstName", "")
     last_name = personal.get("lastName", "")
@@ -1656,6 +1673,7 @@ def run_analysis(submission: dict) -> dict:
         "guarantorPackage": compute_guarantor_package(
             pg_type, guarantor_type, principal_pg_avail,
             borrower_type, liquid_assets, stated_net_worth, loan_amount, borrower_name,
+            spe_type, spe_guarantor_type,
         ),
         "lenderRouting": lender_routing,
         # New HNW raw-data fields — passed through from extraction/submission
