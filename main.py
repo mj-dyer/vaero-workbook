@@ -415,6 +415,20 @@ def submit_deal(request: Request, submission: DealSubmission, background_tasks: 
         # Inject fields not derived by the analysis engine
         if aircraft.get("hangarIdent"):
             analysis.setdefault("aircraft", {})["hangarIdent"] = aircraft["hangarIdent"]
+        # run_analysis() only extracts firstName/lastName/email out of `personal`
+        # for its own borrower-name/email fields -- phone and mailing address
+        # are never derived by the engine, so merge them into deal["profile"]
+        # (the same object Control Tower's Profile tab already reads) here.
+        data.setdefault("profile", {}).update({
+            "phone": personal.get("phone", ""),
+            "street": personal.get("street", ""),
+            "suite": personal.get("suite", ""),
+            "city": personal.get("city", ""),
+            "state": personal.get("state", ""),
+            "zip": personal.get("zip", ""),
+            "contactName": personal.get("contactName", ""),
+            "contactTitle": personal.get("contactTitle", ""),
+        })
 
         deal = {
             "dealId": deal_id,
@@ -676,6 +690,18 @@ def admin_get_deal(deal_id: str, user: dict = Depends(require_admin)):
     result = dict(deal)
     result["analysis"] = _strip_internal_rating(result.get("analysis"))
     return result
+
+
+@app.get("/admin/deals/{deal_id}/iois")
+def admin_get_iois(deal_id: str, user: dict = Depends(require_admin)):
+    """Admin-facing equivalent of GET /deals/{deal_id}/ioi (which is gated to
+    the borrower's own auth) -- lets Control Tower show actual submitted IOI
+    terms, not just the count."""
+    deal = load_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail=f"Deal {deal_id} not found")
+    iois = load_iois(deal_id)
+    return {"dealId": deal_id, "iois": iois, "count": len(iois)}
 
 
 @app.post("/admin/deals/delete-test-batch")
