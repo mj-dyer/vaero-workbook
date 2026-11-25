@@ -732,6 +732,27 @@ def admin_get_iois(deal_id: str, user: dict = Depends(require_admin)):
     return {"dealId": deal_id, "iois": iois, "count": len(iois)}
 
 
+@app.get("/admin/deals/{deal_id}/distributions")
+def admin_get_deal_distributions(deal_id: str, user: dict = Depends(require_admin)):
+    """Who did this deal actually go to -- lets Control Tower show the real
+    recipient list instead of forcing the admin to re-scan the full matched/
+    excluded lender table to figure out who was actually distributed to."""
+    deal = load_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail=f"Deal {deal_id} not found")
+    dist = get_deal_distributions(deal_id)
+    lenders_by_id = {l["lenderId"]: l for l in list_lenders()}
+    enriched = [
+        {
+            "lenderId": d["lenderId"],
+            "distributedAt": d["distributedAt"],
+            "institutionName": lenders_by_id.get(d["lenderId"], {}).get("institutionName", "(unknown lender)"),
+        }
+        for d in dist
+    ]
+    return {"dealId": deal_id, "distributions": enriched, "count": len(enriched)}
+
+
 @app.post("/admin/deals/delete-test-batch")
 def admin_delete_test_batch(user: dict = Depends(require_admin)):
     """Permanently deletes every deal whose borrowerName starts with
