@@ -1180,6 +1180,19 @@ def submit_ioi(deal_id: str, ioi: IOISubmission, background_tasks: BackgroundTas
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/deals/{deal_id}/ioi/mine")
+def get_my_ioi(deal_id: str, lender: dict = Depends(get_current_lender)):
+    """Lets a lender review the IOI they themselves submitted on this deal --
+    deliberately scoped to only their own lenderId, never the full list
+    (a lender should never see another institution's terms)."""
+    deal = load_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail=f"Deal {deal_id} not found")
+    lender_id = lender.get("lenderId", "")
+    mine = [i for i in load_iois(deal_id) if i.get("lenderId") == lender_id]
+    return {"dealId": deal_id, "ioi": mine[-1] if mine else None}
+
+
 @app.get("/lender/me")
 def get_lender_me(lender: dict = Depends(get_current_lender)):
     """Lets the portal know who's logged in -- institution name, contact
