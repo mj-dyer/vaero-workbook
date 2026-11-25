@@ -417,6 +417,8 @@ def submit_deal(request: Request, submission: DealSubmission, background_tasks: 
         # Inject fields not derived by the analysis engine
         if aircraft.get("hangarIdent"):
             analysis.setdefault("aircraft", {})["hangarIdent"] = aircraft["hangarIdent"]
+        if aircraft.get("baseCityState"):
+            analysis.setdefault("aircraft", {})["baseCityState"] = aircraft["baseCityState"]
         # run_analysis() only extracts firstName/lastName/email out of `personal`
         # for its own borrower-name/email fields -- phone and mailing address
         # are never derived by the engine, so merge them into deal["profile"]
@@ -483,7 +485,7 @@ def submit_deal(request: Request, submission: DealSubmission, background_tasks: 
             "nwCoverage": analysis["balanceSheet"]["netWorthCoverage"],
             "flagCount": len(analysis["flags"]),
             "criticalFlags": len([f for f in analysis["flags"] if f.get("severity") == "CRITICAL"]),
-            "aircraftBase": aircraft.get("hangarIdent", ""),
+            "aircraftBase": " — ".join(filter(None, [aircraft.get("hangarIdent", ""), aircraft.get("baseCityState", "")])),
             "dealType": data.get("borrowerType", "individual"),
             "analysis": analysis,
             "transactionType": data.get("transactionType", "purchase"),
