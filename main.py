@@ -431,6 +431,11 @@ def submit_deal(request: Request, submission: DealSubmission, background_tasks: 
             "contactName": personal.get("contactName", ""),
             "contactTitle": personal.get("contactTitle", ""),
         })
+        if data.get("borrowerType") == "private_company":
+            corp_financial = data.get("financial", {})
+            data["profile"]["entityName"] = corp_financial.get("entityName", "")
+            data["profile"]["stateOfFormation"] = corp_financial.get("stateOfFormation", "")
+            data["profile"]["yearsInOperation"] = corp_financial.get("yearsInOperation", "")
 
         # The corporate (private_company) wizard path never asks the
         # individual-borrower pgType question ("full_pg" vs "non_recourse")

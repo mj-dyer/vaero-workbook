@@ -680,13 +680,20 @@ def score_corporate_liquidity(current_ratio: float) -> float:
 
 
 def score_financial_statement_quality(quality: str) -> float:
-    """F4 for corporate — financial statement quality flag."""
+    """F4 for corporate — financial statement quality flag.
+
+    Management-prepared financials are a normal, acceptable basis for
+    underwriting -- most private companies never get a full CPA audit.
+    They're not penalized as a decline-worthy flag; the real-world
+    mitigant (tax returns as cross-reference backup) is handled as a
+    document requirement, not a scoring penalty.
+    """
     q = (quality or "").lower()
     if "audited" in q:    return 2.0
-    if "reviewed" in q:   return 3.5
-    if "compiled" in q:   return 5.5
-    if "management" in q: return 8.0  # management-prepared = hard decline flag
-    return 3.5  # default: treated as reviewed
+    if "reviewed" in q:   return 3.0
+    if "compiled" in q:   return 4.0
+    if "management" in q: return 4.0
+    return 4.0  # default: treated the same as management-prepared
 
 
 def score_gdscr(gdscr: float) -> float:
