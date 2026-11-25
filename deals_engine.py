@@ -842,7 +842,6 @@ def compute_guarantor_package(
     net_worth: float,
     loan_amount: float,
     borrower_name: str,
-    spe_type: str = "",
     spe_guarantor_type: str = "",
 ) -> dict:
     is_corp = borrower_type in ("corporate", "private_company", "company")
@@ -850,44 +849,31 @@ def compute_guarantor_package(
     nw_cov  = round(net_worth / loan_amount, 2) if loan_amount > 0 else 0
 
     if is_corp:
-        # speType tells us whether the borrowing entity IS the operating
-        # company (the standard, common case -- the company itself is
-        # fully liable, which is full recourse to that entity) or a
-        # purpose-built SPE, in which case spe_guarantorType says who
-        # actually stands behind the SPE's obligation. principal_pg_avail
-        # is a separate, additional signal -- whether individual
-        # principals would ALSO personally guarantee on top of the
-        # entity's own obligation -- not the baseline recourse
-        # determination. Treating "no principal PG" as equivalent to
-        # "non-recourse" (the old behavior here) was wrong: a standard
-        # corporate deal where the company itself is the borrower of
-        # record is full recourse regardless of whether an individual
-        # additionally signs on.
-        has_entity_recourse = spe_type == "operating_co" or spe_guarantor_type in ("operating_co", "individual", "both")
+        # spe_guarantorType ("operating_co" | "individual" | "both") is the
+        # single question corporate borrowers answer: who is guaranteeing
+        # the transaction. Titling structure (operating company vs. a
+        # separate holding entity) is deliberately NOT a separate input
+        # here -- it's a closing-document detail that doesn't change who's
+        # financially on the hook, so asking it alongside the guarantee
+        # question was redundant and risked the borrower picking "Operating
+        # Company" for the wrong reason (trusting its balance sheet) even
+        # when their counsel ultimately titles the aircraft in an SPE.
+        has_entity_recourse = spe_guarantor_type in ("operating_co", "individual", "both")
         if has_entity_recourse:
             recourse = "full_recourse"
-            if spe_type == "operating_co":
-                composition = "Operating company (borrower of record)"
-                pkg_type = "Full Recourse — Operating Company"
-            elif spe_guarantor_type in ("operating_co", "both"):
-                composition = "SPE backed by affiliated operating company" + (" + individual guarantor(s)" if spe_guarantor_type == "both" else "")
-                pkg_type = "Full Recourse — SPE Backed by Operating Company"
+            if spe_guarantor_type in ("operating_co", "both"):
+                composition = "Operating company" + (" + individual guarantor(s)" if spe_guarantor_type == "both" else "")
+                pkg_type = "Full Recourse — Operating Company" + (" + Individual Guarantor(s)" if spe_guarantor_type == "both" else "")
             else:
-                composition = "SPE backed by individual guarantor(s)"
-                pkg_type = "Full Recourse — SPE Backed by Individual Guarantor(s)"
-            if principal_pg_avail == "yes":
-                composition += " + willing principals"
+                composition = "Individual guarantor(s)"
+                pkg_type = "Full Recourse — Individual Guarantor(s)"
             if nw_cov >= 3 and liq_cov >= 0.3:
                 strength = "Strong"
             elif nw_cov >= 1:
                 strength = "Adequate"
             else:
                 strength = "Limited"
-            narrative = (
-                f"{composition}. Entity net worth coverage {nw_cov:.1f}x loan; liquid coverage {liq_cov:.2f}x. "
-                + ("Principals have additionally indicated willingness to provide personal guarantees if required or beneficial."
-                   if principal_pg_avail == "yes" else "")
-            ).strip()
+            narrative = f"{composition}. Entity net worth coverage {nw_cov:.1f}x loan; liquid coverage {liq_cov:.2f}x."
         else:
             pkg_type   = "Corporate — Recourse Structure Not Specified"
             recourse   = "unknown"
@@ -967,7 +953,6 @@ def run_analysis(submission: dict) -> dict:
     pg_type = submission.get("pgType") or ""
     guarantor_type = submission.get("guarantorType") or ""
     principal_pg_avail = submission.get("principalPGAvailable") or ""
-    spe_type = submission.get("speType") or ""
     spe_guarantor_type = submission.get("spe_guarantorType") or ""
 
     first_name = personal.get("firstName", "")
@@ -1680,7 +1665,7 @@ def run_analysis(submission: dict) -> dict:
         "guarantorPackage": compute_guarantor_package(
             pg_type, guarantor_type, principal_pg_avail,
             borrower_type, liquid_assets, stated_net_worth, loan_amount, borrower_name,
-            spe_type, spe_guarantor_type,
+            spe_guarantor_type,
         ),
         "lenderRouting": lender_routing,
         # New HNW raw-data fields — passed through from extraction/submission

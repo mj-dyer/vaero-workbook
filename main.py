@@ -441,20 +441,21 @@ def submit_deal(request: Request, submission: DealSubmission, background_tasks: 
 
         # The corporate (private_company) wizard path never asks the
         # individual-borrower pgType question ("full_pg" vs "non_recourse")
-        # -- it captures recourse structure differently via speType
-        # (is the borrowing entity the operating company itself, or a
-        # purpose-built SPE?) and spe_guarantorType (who stands behind an
-        # SPE's obligation). Every path the wizard currently exposes has
-        # SOME real obligor beyond the aircraft -- the operating company,
-        # an individual, or both -- there's no true non-recourse/
-        # asset-only option yet. Leaving pgType unset here (the old
-        # behavior) silently defaulted every corporate deal to
-        # "non_recourse", excluding it from every full-recourse-only
-        # lender regardless of what the borrower actually indicated.
+        # -- it captures recourse structure via spe_guarantorType (who is
+        # guaranteeing the transaction: the operating company, an
+        # individual, or both). Titling structure (operating company vs.
+        # a separate holding entity) doesn't affect this -- it's a
+        # closing-document detail, not a lender-fit question -- so it's
+        # deliberately not asked or read here. Every path the wizard
+        # currently exposes has SOME real obligor beyond the aircraft;
+        # there's no true non-recourse/asset-only option yet. Leaving
+        # pgType unset here (the old behavior) silently defaulted every
+        # corporate deal to "non_recourse", excluding it from every
+        # full-recourse-only lender regardless of what the borrower
+        # actually indicated.
         if data.get("borrowerType") == "private_company":
-            spe_type = data.get("speType", "")
             spe_guarantor = data.get("spe_guarantorType", "")
-            if spe_type == "operating_co" or spe_guarantor in ("operating_co", "individual", "both"):
+            if spe_guarantor in ("operating_co", "individual", "both"):
                 data["pgType"] = "full_pg"
 
         deal = {
